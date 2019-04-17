@@ -10,36 +10,12 @@
 
 #include "ynet_net.h"
 #include "../sock/sock_tcp.h"
-#include "job_tracker.h"
 #include "net_global.h"
 #include "sunrpc_passive.h"
 #include "sunrpc_proto.h"
-#include "dbg.h"
 #include "configure.h"
-
-event_job_t sunrpc_nfs3_handler;
-event_job_t sunrpc_mount_handler;
-event_job_t sunrpc_acl_handler;
-event_job_t sunrpc_nlm_handler;
-extern jobtracker_t *sunrpc_jobtracker;
-
-#if 0
-void sunrpc_procedure_register(uint32_t program, event_job_t handler)
-{
-        if (program == MOUNTPROG)
-                sunrpc_mount_handler = handler;
-        else if (program == NFS3_PROGRAM)
-                sunrpc_nfs3_handler = handler;
-        else if (program == ACL_PROGRAM)
-                sunrpc_acl_handler = handler;
-        else if (program == NLM_PROGRAM)
-                sunrpc_nlm_handler = handler;
-        else {
-                DERROR("we got wrong program %u-----%u\n", program, (unsigned int)NLM_PROGRAM);
-                YASSERT(0);
-        }
-}
-#endif
+#include "main_loop.h"
+#include "dbg.h"
 
 static void *__sunrpc_tcp_passive__(void *_arg)
 {
@@ -49,6 +25,8 @@ static void *__sunrpc_tcp_passive__(void *_arg)
         sd = *_sd;
 
         yfree((void**)&_sd);
+
+        main_loop_hold();        
         
         DINFO("--------------start listen %d--------\n", sd);
 

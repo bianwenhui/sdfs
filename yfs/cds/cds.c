@@ -32,11 +32,14 @@
 #include "replica.h"
 #include "schedule.h"
 #include "redis.h"
+#include "core.h"
+#include "io_analysis.h"
 #include "net_global.h"
 #include "../../cds/diskio.h"
 #include "bh.h"
 #include "dbg.h"
 
+extern int use_memcache;
 cds_info_t cds_info;
 uint32_t num_cds_read;
 uint32_t num_cds_read_done;
@@ -83,9 +86,6 @@ io_analy_t io_analysis;
 #define CDS_LEVELDB_THREAD_NUM 4
 
 extern int __is_cds_cache;
-
-jobtracker_t *replica_jobtracker;
-extern jobtracker_t *objs_jobtracker;
 
 #if 0
 /* handler for cds state. */
@@ -164,9 +164,7 @@ void cds_signal_handler(int sig)
 
         jobdock_iterator();
 
-        disk_dumpref();
-
-        analysis_dump();
+        analysis_dumpall();
 }
 
 int cds_destroy(int cds_sd, int servicenum)
@@ -176,19 +174,15 @@ int cds_destroy(int cds_sd, int servicenum)
         (void) cds_sd;
         (void) servicenum;
 
-#if PROC_MONITOR_ON
-        proc_destroy();
-#endif
-
         return 0;
 }
 
-int disk_unlink1(const chkid_t *chkid)
+int disk_unlink1(const chkid_t *chkid, uint64_t snapvers)
 {
         int ret;
         char dpath[MAX_PATH_LEN] = {0}, dir[MAX_PATH_LEN];
 
-        chkid2path(chkid, dpath);
+        chkid2path(chkid, snapvers, dpath);
 
         ret = unlink(dpath);
         if (ret == -1) {
@@ -208,7 +202,7 @@ err_ret:
 }
 
 
-static int __chunk_unlink(const chkid_t *chkid)
+static int __chunk_unlink(const chkid_t *chkid, uint64_t snapvers)
 {
         int i;
         int ret;
@@ -232,7 +226,7 @@ static int __chunk_unlink(const chkid_t *chkid)
                 }
         }
 
-        ret = disk_unlink1(chkid);
+        ret = disk_unlink1(chkid, snapvers);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -251,7 +245,7 @@ int chunk_cleanup(void *arg)
 
         (void) arg;
 
-        DINFO("get cleanup msg\n");
+        DBUG("get cleanup msg\n");
 
         while (1) {
                 count = 100;
@@ -269,7 +263,8 @@ int chunk_cleanup(void *arg)
                         chkid = &array[i];
                         YASSERT(chkid_null(chkid) == 0);
 
-                        ret = __chunk_unlink(chkid);
+                        UNIMPLEMENTED(__WARN__);
+                        ret = __chunk_unlink(chkid, 0);
                         if (ret) {
                                 if (ret == ENOENT || ret == EPERM)
                                         continue;
@@ -319,19 +314,28 @@ int cds_init(const char *home, int *cds_sd, int servicenum, int diskno, uint64_t
         ret = disk_init(home, max_object);
         if (ret)
                 GOTO(err_ret, ret);
-        
+
         ret = cds_volume_init();
         if (ret)
                 GOTO(err_ret, ret);
 
-#if PROC_MONITOR_ON
-        ret = proc_init();
-        if (ret)
-                GOTO(err_ret, ret);
+        int flag = CORE_FLAG_PASSIVE | CORE_FLAG_AIO;
+        int core;
+#if 1
+        if (cdsconf.cds_polling && gloconf.polling_timeout == 0) {
+                flag |= CORE_FLAG_POLLING;
+                core = 1;
+        } else {
+                core = 4;
+        }
 #endif
 
+        ret = core_init(core, flag);
+        if (ret)
+                GOTO(err_ret, ret);
+        
 retry:
-        ret = network_connect_master();
+        ret = network_connect_mond(1);
         if (ret) {
                 ret = _errno(ret);
                 if (ret == EAGAIN) {
@@ -486,19 +490,19 @@ int cds_run(void *args)
 
         max_object = (LLU)fsbuf.f_blocks * fsbuf.f_bsize / YFS_CHK_LEN_DEF;
 
+#if ENABLE_MEM_CACHE1
+        use_memcache = 1;
+#endif
+
         ret = ly_init(daemon, name, max_object * 2 + MAX_OPEN_FILE);
         if (ret)
                 GOTO(err_ret, ret);
 
         DINFO("cds %s avail %lluGB total %lluGB, max object %llu, tier %u\n", home,
               ((LLU)fsbuf.f_bavail * fsbuf.f_bsize) / (1024 * 1024 * 1024LL),
-              ((LLU)fsbuf.f_blocks * fsbuf.f_bsize) / (1024 * 1024 * 1024LL), (LLU)max_object, cds_info.tier);
+              ((LLU)fsbuf.f_blocks * fsbuf.f_bsize) / (1024 * 1024 * 1024LL),
+              (LLU)max_object, cds_info.tier);
 
-
-        ret = jobtracker_create(&replica_jobtracker, 5, "replica");
-        if (ret)
-                GOTO(err_ret, ret);
-        
         ret = path_validate(home, 1, 1);
         if (ret)
                 GOTO(err_ret, ret);
@@ -510,9 +514,12 @@ int cds_run(void *args)
         }
 
         cds_info.running = 1;
-
         __fence_test_need__ = 1;
 
+        ret = io_analysis_init("cds", diskno);
+        if (ret)
+                GOTO(err_ret, ret);
+        
         ret = cds_init(home, NULL, servicenum, diskno, max_object);
         if (ret)
                 GOTO(err_ret, ret);
@@ -525,14 +532,6 @@ int cds_run(void *args)
         if (ret)
                 GOTO(err_ret, ret);
         
-#if PROC_MONITOR_ON
-        snprintf(path, sizeof(path), "cds_%d", diskno);
-
-        ret = proc_log(path);
-        if (ret)
-                GOTO(err_ret, ret);
-#endif
-
         DBUG("cds (diskno %d) started ...\n", diskno);
 
         ret = rpc_start(); /*begin serivce*/
@@ -570,6 +569,12 @@ int cds_run(void *args)
 
         while (cds_info.running) { //we got nothing to do here
                 sleep(1);
+
+#if 0
+                if (time(NULL) % 10 == 0) {
+                        DINFO("latency %ju\n", core_latency_get());
+                }
+#endif
         }
 
         ret = ly_update_status("stopping", -1);

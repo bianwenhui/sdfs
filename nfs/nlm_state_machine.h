@@ -17,7 +17,7 @@
  */
 #ifndef __NLM_STATUS_MACHINE_H__
 #define __NLM_STATUS_MACHINE_H__
-#include "nfs_state_machine.h"
+#include "nfs3.h"
 #include "xdr.h"
 
 #include <rpc/rpc.h>
@@ -31,7 +31,6 @@
 
 #define UNIX_PATH_MAX 108
 
-#define NLM_SERVICE_DEF "3001"
 #define NFS_TCPDATA_MAX 1048576
 #define NFS_RTMULT 2
 #define NFS_NAMLEN_MAX 255

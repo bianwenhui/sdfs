@@ -6,11 +6,11 @@
 
 #include "attr.h"
 #include "file_proto.h"
-#include "nfs_state_machine.h"
+#include "nfs3.h"
 #include "sdfs_lib.h"
 #include "md_attr.h"
-#include "network.h"
-#include "yfscli_conf.h"
+#include "attr_queue.h"
+#include "schedule.h"
 #include "dbg.h"
 
 /*
@@ -29,9 +29,15 @@ int sattr_utime(const fileid_t *fileid, int at, int mt, int ct)
                             mt ? __SET_TO_SERVER_TIME : __DONT_CHANGE, NULL,
                             ct ? __SET_TO_SERVER_TIME : __DONT_CHANGE, NULL);
 
-        ret = sdfs_setattr(fileid, &setattr, 0);
+#if ENABLE_ATTR_QUEUE
+        ret = attr_queue_settime(NULL, fileid, &setattr);
         if (ret)
                 GOTO(err_ret, ret);
+#else
+        ret = sdfs_setattr(NULL, fileid, &setattr, 0);
+        if (ret)
+                GOTO(err_ret, ret);
+#endif
         
         return 0;
 err_ret:
@@ -40,8 +46,8 @@ err_ret:
 
 int sattr_set(const fileid_t *fileid, const sattr *attr, const nfs3_time *ctime)
 {
-        int ret, update = 0;
-        setattr_t setattr;
+        int ret, update = 0, settime;
+        setattr_t setattr, time;
         struct timespec t;
 
         DBUG("attr set %u %u %u %u %u %u %u %p\n",
@@ -54,6 +60,7 @@ int sattr_set(const fileid_t *fileid, const sattr *attr, const nfs3_time *ctime)
               ctime);
 
         setattr_init(&setattr, -1, -1, NULL, -1, -1, -1);
+        setattr_init(&time, -1, -1, NULL, -1, -1, -1);
 
         if (attr->uid.set_it == TRUE) {
                 setattr.uid.set_it = 1;
@@ -76,41 +83,44 @@ int sattr_set(const fileid_t *fileid, const sattr *attr, const nfs3_time *ctime)
         if (attr->size.set_it == TRUE) {
                 setattr.size.set_it = 1;
                 setattr.size.size = attr->size.size;
-                update = 1;
+
+                ret = sdfs_truncate(NULL, fileid, setattr.size.size);
+                if (ret)
+                        GOTO(err_ret, ret);
         }
 
         if (attr->atime.set_it == SET_TO_SERVER_TIME) {
-                setattr_update_time(&setattr,
+                setattr_update_time(&time,
                                     __SET_TO_SERVER_TIME, NULL,
                                     __DONT_CHANGE, NULL,
                                     __DONT_CHANGE, NULL);
-                update = 1;
+                settime = 1;
         } else if (attr->atime.set_it == SET_TO_CLIENT_TIME) {
                 t.tv_sec = attr->atime.time.seconds;
                 t.tv_nsec = attr->atime.time.nseconds;
                 
-                setattr_update_time(&setattr,
+                setattr_update_time(&time,
                                     __SET_TO_CLIENT_TIME, &t,
                                     __DONT_CHANGE, NULL,
                                     __DONT_CHANGE, NULL);
-                update = 1;
+                settime = 1;
         }
 
         if (attr->mtime.set_it == SET_TO_SERVER_TIME) {
-                setattr_update_time(&setattr,
+                setattr_update_time(&time,
                                     __DONT_CHANGE, NULL,
                                     __SET_TO_SERVER_TIME, NULL,
                                     __DONT_CHANGE, NULL);
-                update = 1;
+                settime = 1;
         } else if (attr->mtime.set_it == SET_TO_CLIENT_TIME) {
                 t.tv_sec = attr->mtime.time.seconds;
                 t.tv_nsec = attr->mtime.time.nseconds;
 
-                setattr_update_time(&setattr,
+                setattr_update_time(&time,
                                     __DONT_CHANGE, NULL,
                                     __SET_TO_CLIENT_TIME, &t,
                                     __DONT_CHANGE, NULL);
-                update = 1;
+                settime = 1;
         }
 
         if (ctime) {
@@ -124,19 +134,26 @@ int sattr_set(const fileid_t *fileid, const sattr *attr, const nfs3_time *ctime)
                 DINFO("time %s\n", _time);
 #endif
                 
-                setattr_update_time(&setattr,
+                setattr_update_time(&time,
                                     __DONT_CHANGE, NULL,
                                     __DONT_CHANGE, NULL,
                                     __SET_TO_CLIENT_TIME, &t);
-                update = 1;
+                settime = 1;
         }
 
         if (update) {
-                ret = sdfs_setattr(fileid, &setattr, 1);
+                ret = sdfs_setattr(NULL, fileid, &setattr, 1);
                 if (ret)
                         GOTO(err_ret, ret);
         }
 
+        if (settime) {
+                ret = sdfs_setattr(NULL, fileid, &time, 1);
+                if (ret)
+                        GOTO(err_ret, ret);
+                        
+        }
+        
         return 0;
 err_ret:
         return ret;
@@ -210,10 +227,10 @@ void get_postopattr1(const fileid_t *fileid, post_op_attr *attr)
         attr->attr_follow = FALSE;
         retry = 0;
 retry:
-        ret = sdfs_getattr(fileid, &stbuf);
+        ret = sdfs_getattr(NULL, fileid, &stbuf);
         if (ret) {
                 if (NEED_EAGAIN(ret)) {
-                        SLEEP_RETRY3(err_ret, ret, retry, retry, 100);
+                        USLEEP_RETRY(err_ret, ret, retry, retry, 30, (1000 * 1000));
                 } else {
                         GOTO(err_ret, ret);
                 }
@@ -236,12 +253,17 @@ void get_preopattr1(const fileid_t *fileid, preop_attr *attr)
         DBUG("pre op attr\n");
 
         attr->attr_follow = FALSE;
+
+#if 0
+        return;
+#endif
+
         retry = 0;
 retry:
-        ret = sdfs_getattr(fileid, &stbuf);
+        ret = sdfs_getattr(NULL, fileid, &stbuf);
         if (ret) {
-                if NEED_EAGAIN(ret) {
-                        SLEEP_RETRY3(err_ret, ret, retry, retry, 100);
+                if (NEED_EAGAIN(ret)) {
+                        USLEEP_RETRY(err_ret, ret, retry, retry, 30, (1000 * 1000));
                 } else {
                         GOTO(err_ret, ret);
                 }

@@ -44,7 +44,7 @@ void rpc_reply_prep1(const msgid_t *msgid, buffer_t *buf, buffer_t *data)
         net_rep->msgid = *msgid;
         net_rep->crcode = 0;
         net_rep->blocks = 0;
-        net_rep->load = jobdock_load();;
+        net_rep->load = core_latency_get();;
         net_rep->priority = 0;
         net_rep->time = gettime();
 
@@ -72,7 +72,7 @@ void rpc_reply_prep(const msgid_t *msgid, buffer_t *buf, buffer_t *data, int fla
         net_rep->crcode = 0;
         net_rep->blocks = 0;
         net_rep->priority = 0;
-        net_rep->load = jobdock_load();
+        net_rep->load = core_latency_get();
         net_rep->time = gettime();
 
         if (data) {
@@ -99,10 +99,34 @@ void rpc_reply_prep(const msgid_t *msgid, buffer_t *buf, buffer_t *data, int fla
               _inet_ntoa(sockid->addr));
 
         rpc_reply_prep(msgid, &buf, _buf, 1);
+
+#if ENABLE_CORE_PIPELINE
+        ret = core_pipeline_send(sockid, &buf, 0);
+        if (unlikely(ret)) {
+                ret = _errno_net(ret);
+                if (ret == ENOSYS) {
+                        sock2nh(&nh, sockid);
+                        ret = sdevent_queue(&nh, &buf, 0);
+                        if (unlikely(ret)) {
+                                ret = _errno_net(ret);
+                                GOTO(err_free, ret);
+                        }
+                } else
+                        GOTO(err_free, ret);
+        }
+#else
         sock2nh(&nh, sockid);
         ret = sdevent_queue(&nh, &buf, 0);
-        if (unlikely(ret))
-                mbuffer_free(&buf);
+        if (unlikely(ret)) {
+                ret = _errno_net(ret);
+                GOTO(err_free, ret);
+        }
+#endif
+
+        return;
+err_free:
+        mbuffer_free(&buf);
+        return;
 }
 
 void rpc_reply(const sockid_t *sockid, const msgid_t *msgid, const void *_buf, int len)
@@ -138,7 +162,7 @@ void rpc_reply_error_prep(const msgid_t *msgid, buffer_t *buf, int _error)
         net_rep->crcode = 0;
         net_rep->blocks = 0;
         net_rep->priority = 0;
-        net_rep->load = jobdock_load();
+        net_rep->load = core_latency_get();
         net_rep->time = gettime();
 
         net_err = (void *)net_rep->buf;
@@ -171,7 +195,7 @@ void rpc_reply_error(const sockid_t *sockid, const msgid_t *msgid, int _error)
         net_rep->crcode = 0;
         net_rep->blocks = 0;
         net_rep->priority = 0;
-        net_rep->load = jobdock_load();
+        net_rep->load = core_latency_get();
         net_rep->time = gettime();
 
         net_err = (void *)net_rep->buf;

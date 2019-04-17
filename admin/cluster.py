@@ -160,6 +160,7 @@ class Cluster(object):
                 _exec_reload = "systemctl daemon-reload"
                 _exec_all_cmd = _exec_all_cmd + _exec_reload + ' && '
 
+                """
                 # to load dbus config file
                 #start message-bus
                 _exec_dbus = "systemctl restart messagebus"
@@ -168,6 +169,7 @@ class Cluster(object):
                 # restart systemd-logind
                 _exec_login = "systemctl restart systemd-logind"
                 _exec_all_cmd = _exec_all_cmd + _exec_login + ' && '
+                """
 
             _exec_rmdir = "rm -rf %s/*" % (nfs_temp)
             _exec_all_cmd = _exec_all_cmd + _exec_rmdir
@@ -398,6 +400,20 @@ class Cluster(object):
         args = [[self.config.uss_node, x] for x in self.config.cluster.keys()]
         mutil_exec(_cluster_stop, args)
 
+    def restart(self):
+        def _warp(h):
+            cmd = "python2 %s restart" % (self.config.uss_node)
+            x, y = exec_remote(h, cmd)
+            print "restart host: %s \n%s" % (h, x)
+            if y:
+                print y
+
+        args = [[x] for x in self.config.cluster.keys()]
+        mutil_exec(_warp, args)
+
+        cmd = "python %s/app/admin/check_domain.py check" % (self.config.home)
+        exec_shell(cmd)
+        
     def stat(self):
         def _warp(h):
             cmd = "python2 %s stat" % (self.config.uss_node)
@@ -454,9 +470,9 @@ class Cluster(object):
         exec_shell(cmd)
         '''
         移动集采 暂时关闭
-        cmd = "sdfs.mkdir /nfs_minio"
-        exec_shell(cmd)
         '''
+        #cmd = "sdfs.mkdir /nfs_minio"
+        #exec_shell(cmd)
 
         #test nfs-ganesha
         if self.config.testing:
@@ -1110,8 +1126,7 @@ if __name__ == "__main__":
     parser_stop.set_defaults(func=_stop)
 
     def _restart(args, cluster):
-        cluster.stop()
-        cluster.start()
+        cluster.restart()
     parser_restart = subparsers.add_parser('restart', help='restart services')
     parser_restart.set_defaults(func=_restart)
 

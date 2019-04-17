@@ -1,4 +1,4 @@
-#include <aio.h>
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <rpc/rpc.h>
@@ -17,17 +17,15 @@
 #define DBG_SUBSYS S_YNFS
 
 #include "yfs_conf.h"
-#include "ynfs_conf.h"
 #include "network.h"
-#include "aiocb.h"
 #include "attr.h"
 #include "error.h"
 #include "nfs_events.h"
-#include "nfs_job_context.h"
+#include "nfs_args.h"
 #include "net_global.h"
 #include "nfs_conf.h"
 #include "nfs_events.h"
-#include "nfs_state_machine.h"
+#include "nfs3.h"
 #include "readdir.h"
 #include "sunrpc_proto.h"
 #include "sunrpc_reply.h"
@@ -36,7 +34,6 @@
 #include "configure.h"
 #include "sdfs_lib.h"
 #include "yfs_limit.h"
-#include "nfs_proc.h"
 #include "dbg.h"
 
 static int __sdfs_dir_itor1(const dirid_t *dirid, func1_t func, void *ctx)
@@ -49,7 +46,7 @@ static int __sdfs_dir_itor1(const dirid_t *dirid, func1_t func, void *ctx)
         uint64_t count;
         
         while (srv_running) {
-                ret = sdfs_readdir1(dirid, offset, &de0, &delen);
+                ret = sdfs_readdir1(NULL, dirid, offset, &de0, &delen);
                 if (ret) {
                         GOTO(err_ret, ret);
                 }
@@ -86,7 +83,7 @@ static void __nfs_remove_file(void *_de, void *_arg)
 
         DINFO("remove %s @ "CHKID_FORMAT"\n", de->d_name, CHKID_ARG(parent));
         
-        ret = sdfs_unlink(parent, de->d_name);
+        ret = sdfs_unlink(NULL, parent, de->d_name);
         if (ret) {
                 DWARN("remove %s @ "CHKID_FORMAT" fail\n", de->d_name, CHKID_ARG(parent));
         }
@@ -100,7 +97,7 @@ static void __nfs_remove_bytime(void *_de, void *_arg)
         const dirid_t *parent = _arg;
         dirid_t dirid;
 
-        now = time(NULL);
+        now = gettime();
         t = atoi(de->d_name);
         if (now - t < 3600) {
                 DINFO("name %s diff %u, skip it\n", de->d_name, now - t);
@@ -109,7 +106,7 @@ static void __nfs_remove_bytime(void *_de, void *_arg)
 
         DINFO("name %s diff %u, remove it\n", de->d_name, now - t);
 
-        ret = sdfs_lookup(parent, de->d_name, &dirid);
+        ret = sdfs_lookup(NULL, parent, de->d_name, &dirid);
         if (ret) {
                 DWARN("lookup %s @ "CHKID_FORMAT" fail\n", de->d_name, CHKID_ARG(parent));
                 return;
@@ -121,7 +118,7 @@ static void __nfs_remove_bytime(void *_de, void *_arg)
                 return;
         }
 
-        ret = sdfs_rmdir(parent, de->d_name);
+        ret = sdfs_rmdir(NULL, parent, de->d_name);
         if (ret) {
                 DWARN("rmdir %s @ "CHKID_FORMAT" fail\n", de->d_name, CHKID_ARG(parent));
                 return;
@@ -191,7 +188,7 @@ err_ret:
         return ret;
 }
 
-static  int __nfs_remove_getvolid(const dirid_t *_dirid, volid_t *volid)
+static  int __nfs_remove_getvolid(const dirid_t *_dirid, dirid_t *volid)
 {
         int ret;
         dirid_t dirid, parent;
@@ -200,7 +197,7 @@ static  int __nfs_remove_getvolid(const dirid_t *_dirid, volid_t *volid)
         
         dirid = *_dirid;
         while (1) {
-                ret = sdfs_lookup(&dirid, "..", &parent);
+                ret = sdfs_lookup(NULL, &dirid, "..", &parent);
                 if (ret)
                         GOTO(err_ret, ret);
 
@@ -223,7 +220,7 @@ err_ret:
 int nfs_remove(const fileid_t *parent, const char *name)
 {
         int ret;
-        volid_t volid;
+        dirid_t volid;
         dirid_t removed, workdir;
         time_t now;
         char tname[MAX_NAME_LEN], _uuid[MAX_NAME_LEN];
@@ -233,38 +230,62 @@ int nfs_remove(const fileid_t *parent, const char *name)
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = sdfs_mkdir(&volid, NFS_REMOVED, NULL, &removed, 0, 0, 0);
+retry:
+        ret = sdfs_lookup(NULL, &volid, NFS_REMOVED, &removed);
         if (ret) {
-                if (ret == EEXIST) {
-                        ret = sdfs_lookup(&volid, NFS_REMOVED, &removed);
-                        if (ret)
-                                GOTO(err_ret, ret);
+                if (ret == ENOENT) {
+                        ret = sdfs_mkdir(NULL, &volid, NFS_REMOVED, NULL, &removed, 0, 0, 0);
+                        if (ret) {
+                                if (ret == EEXIST) {
+                                        goto retry;
+                                } else
+                                        GOTO(err_ret, ret);
+                        }
                 } else
                         GOTO(err_ret, ret);
         }
 
-        now = time(NULL);
+        now = gettime();
         snprintf(tname, MAX_NAME_LEN, "%d", ((int)now / 3600) * 3600);
 
-        ret = sdfs_mkdir(&removed, tname, NULL, &workdir, 0, 0, 0);
+        ret = sdfs_lookup(NULL, &removed, tname, &workdir);
         if (ret) {
-                if (ret == EEXIST) {
-                        ret = sdfs_lookup(&removed, tname, &workdir);
-                        if (ret)
-                                GOTO(err_ret, ret);
-                } else
+                if (ret == ENOENT) {
+                        ret = sdfs_mkdir(NULL, &removed, tname, NULL, &workdir, 0, 0, 0);
+                        if (ret) {
+                                if (ret == EEXIST) {
+                                        goto retry;
+                                } else
+                                        GOTO(err_ret, ret);
+                        }
+                } else 
                         GOTO(err_ret, ret);
         }
 
         uuid_generate(uuid);
         uuid_unparse(uuid, _uuid);
 
+#if ENABLE_MD_POSIX
+        fileid_t fileid;
+        ret = sdfs_lookup(NULL, parent, name, &fileid);
+        if (ret)
+                GOTO(err_ret, ret);
+#endif
+        
+        
         DBUG("rename to %s\n", _uuid);
-        ret = sdfs_rename(parent, name, &workdir, _uuid);
+        ret = sdfs_rename(NULL, parent, name, &workdir, _uuid);
         if (ret) {
                 GOTO(err_ret, ret);
         }
 
+#if ENABLE_MD_POSIX
+        struct timespec t;
+        clock_gettime(CLOCK_REALTIME, &t);
+        sdfs_utime(NULL, parent, NULL, &t, &t);
+        sdfs_utime(NULL, &fileid, NULL, NULL, &t);
+#endif
+        
         return 0;
 err_ret:
         return ret;

@@ -16,7 +16,7 @@
 #include "sdevent.h"
 #include "../net/xnect.h"
 #include "net_table.h"
-#include "sdfs_aio.h"
+#include "aio.h"
 #include "rpc_table.h"
 #include "configure.h"
 #include "main_loop.h"
@@ -179,9 +179,11 @@ static void *__main_loop_worker(void *_args)
                 schedule_run(NULL);
                 schedule_scan(NULL);
 
+#if 0
                 if (ng.daemon) {
                         aio_submit();
                 }
+#endif
 
                 worker->busy = 0;
         }

@@ -57,11 +57,7 @@ typedef struct {
 
 #pragma pack()
 
-int sunrpc_accept_handler(void *sock, void *);
 int sunrpc_accept(int srv_sd);
-int sunrpc_request_handler(job_t *job, void *sock, void *context);
-//int sunrpc_pack_handler(void *self, void *);
 int sunrpc_pack_len(void *buf, uint32_t len, int *msg_len, int *io_len);
-int sunrpc_init();
 
 #endif

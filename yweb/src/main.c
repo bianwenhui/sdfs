@@ -11,7 +11,7 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <aio.h>
+
 
 #define DBG_SUBSYS S_YWEB
 
@@ -33,6 +33,13 @@
 #include "configure.h"
 #include "proc.h"
 #include "dbg.h"
+
+inline void http_exit_handler(int sig)
+{
+        DWARN("got signal %d, exiting\n", sig);
+
+        srv_running = 0;
+}
 
 #if 0
 
@@ -452,7 +459,7 @@ int http_srv(int daemon, const char *port)
         int ret;
 
         signal(SIGUSR1, signal_handler);
-        signal(SIGUSR2, exit_handler);
+        signal(SIGUSR2, http_exit_handler);
 
         mime_init();
 
@@ -464,27 +471,17 @@ int http_srv(int daemon, const char *port)
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = io_analysis_init("ftp", 0);
+        ret = io_analysis_init("http", 0);
         if (ret)
                 GOTO(err_ret, ret);
         
-        ret = network_connect_master();
+        ret = network_connect_mond(0);
         if (ret)
                 GOTO(err_ret, ret);
 
         ret = http_listen(port, YNET_RPC_NONBLOCK);
         if (ret)
                 GOTO(err_ret, ret);
-
-#if PROC_MONITOR_ON
-        ret = proc_init();
-        if (ret)
-                GOTO(err_ret, ret);
-
-        ret = proc_log("yweb");
-        if (ret)
-                GOTO(err_ret, ret);
-#endif
 
         ret = rpc_start(); /*begin serivce*/
         if (ret)

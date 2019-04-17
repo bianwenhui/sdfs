@@ -269,7 +269,6 @@ int md_share_list_byprotocal(share_protocol_t protocol, shareinfo_t **_shareinfo
         arg.protocol = protocol;
         arg.max = 0;
         arg.count = 0;
-        arg.shareinfo = NULL;
 
         ret = kvop->iter(roottype_share, NULL, __md_share_list_byprotocal, &arg);
         if (ret)
@@ -285,15 +284,27 @@ err_ret:
 
 int md_set_shareinfo(share_protocol_t prot, const void *req_buf, const int req_buflen)
 {
+        int ret;
         const shareinfo_t *shareinfo = req_buf;
         shareinfo_t _shareinfo = *shareinfo;
 
         (void) req_buflen;
 
-        YASSERT(strlen(shareinfo->share_name));
+        if (strlen(shareinfo->share_name) == 0) {
+                printf("share name needed\n");
+                ret = EINVAL;
+                GOTO(err_ret, ret);
+        }
+
         _shareinfo.protocol = prot;
 
-        return md_share_set(shareinfo->share_name, &_shareinfo);
+        ret = md_share_set(shareinfo->share_name, &_shareinfo);
+        if (ret)
+                GOTO(err_ret, ret);
+
+        return 0;
+err_ret:
+        return ret;
 }
 
 int md_get_shareinfo(share_protocol_t prot, const void *req_buf,

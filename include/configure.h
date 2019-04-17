@@ -80,9 +80,10 @@ struct nfsconf_t
 {
         int use_export;
         int export_size;
+        int nfs_port;
+        int nlm_port;
         int rsize;
         int wsize;
-        int job_qos;
         struct nfsconf_export_t nfs_export[1024];
 };
 
@@ -107,22 +108,14 @@ struct mdsconf_t
         int chknew_hardend;
         char db[MAX_NAME_LEN];
         uint64_t disk_keep;
-        int redis_wait;
-        int redis_thread;
-        int redis_total;
-        char leveldb[MAX_PATH_LEN];
-        int leveldb_physical_package_id;
-        int schedule_physical_package_id;
-
-        
-        int leveldb_queue; //线程池的个数
-        int leveldb_queue_pb; //线程池中处理Pb任务的个数
-        int leveldb_queue_worker; //每个线程池中，线程个数
 
         int main_loop_threads;
+        int redis_baseport;
         int redis_sharding;
         int redis_replica;
-        int redis_baseport;
+        int redis_thread;
+        int size_on_md;
+        int ac_timeout;
 };
 
 /* cds configure */
@@ -130,13 +123,11 @@ struct cdsconf_t
 {
         int disk_timeout;
         int unlink_async;
-        int ha_mode;
         int queue_depth;
         int prealloc_max;
-        int ec_lock;
         int io_sync;
-
-        int lvm_qos_refresh;
+        int cds_polling;
+        int aio_thread;
 };
 
 struct logconf_t
@@ -170,6 +161,7 @@ struct gloconf_t
 {
         char cluster_name[MAXSIZE];
         char iscsi_iqn[MAXSIZE];
+        char uuid[UUID_LEN];
         int coredump;
         int backtrace;
         int testing;
@@ -177,9 +169,12 @@ struct gloconf_t
         int lease_timeout;
         int hb_timeout;
         int hb_retry;
-        char nfs[MAXSIZE];
+        char nfs_srv[MAXSIZE];
 
         int solomode;
+
+        int memcache_count;
+        int memcache_seg;
         
         //fake config
         int rdma;
@@ -195,9 +190,6 @@ struct gloconf_t
         int write_back;
         uint64_t cache_size;
         int net_crc;
-        int io_mode;
-        int dir_refresh;
-        int file_refresh;
         int wmem_max;
         int rmem_max;
         int check_version;
@@ -205,16 +197,12 @@ struct gloconf_t
         int restart;
         char master_vip[MAXSIZE]; //ip1,ip2,vip
         int valgrind;
-        char polling_core[MAXSIZE];
+        int polling_core;
         int polling_timeout;
-        char aio_core[MAXSIZE];
-        int direct_port;
+        int aio_core;
 
         int sdevents_threads;
         int jobdock_size;
-        int yfs_jobtracker;
-        int nfs_jobtracker;
-        int objs_jobtracker;
 
         uint64_t chunk_entry_max;
 
@@ -223,10 +211,6 @@ struct gloconf_t
         int disk_mt_ssd;
 
         int disk_worker;
-
-        int lookup_cache;
-
-        int preload_chk;
 
         int hb;
 
@@ -260,5 +244,8 @@ extern struct yftp_conf_t yftp_conf;
 #define SOCKID_CORENET 20
 
 #define REDIS_BASEPORT 6490
+
+#define NLM_SERVICE_DEF 3001
+#define NFS_SERVICE_DEF 3049
 
 #endif

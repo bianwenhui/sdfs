@@ -40,16 +40,18 @@ def usage():
            "    write\n"
            "admin ops:\n"
            "    user\n"
+           "    group\n"
            "    worm\n"
            "    share\n"
            "    health\n"
+           "    mon\n"
            )
 
 
 def is_c_type(cmd):
     lst = ['mkdir', 'ls', 'touch', 'stat', 'attr', 'cat', 'chmod',
            'chown', 'ln', 'mv', 'rmdir', 'truncate', 'write'
-           'user', 'worm', 'share', 'health']
+           'user', 'group', 'worm', 'share', 'health']
     if cmd in lst:
         return True
     else:
@@ -63,7 +65,7 @@ def run_c_type(cmd, argv):
     #exec_pipe(array, 0, False, 0)
 
 def is_python_type(cmd):
-    lst = ['cluster', 'node']
+    lst = ['cluster', 'node', 'mon']
     if cmd in lst:
         return True
     else:

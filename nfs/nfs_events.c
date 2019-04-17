@@ -15,13 +15,12 @@
 #include "job_tracker.h"
 #include "schedule.h"
 #include "nfs_events.h"
-#include "nfs_state_machine.h"
-#include "nfs_job_context.h"
+#include "nfs3.h"
+#include "nfs_args.h"
 #include "xdr_nfs.h"
 #include "sunrpc_reply.h"
 #include "sunrpc_passive.h"
 #include "sunrpc_proto.h"
-#include "ynfs_conf.h"
 #include "nfs_conf.h"
 #include "ynet_rpc.h"
 #include "dbg.h"
@@ -44,7 +43,6 @@ int acl_null_svc(const sockid_t *sockid, const sunrpc_request_t *req,
         (void) gid;
         (void) arg;
         (void) buf;
-
         
         ret = sunrpc_reply(sockid, req, ACCEPT_STATE_ERROR, NULL, NULL);
         if (ret)
@@ -121,7 +119,7 @@ static void __nfs_exec(void *ctx)
                 nfs_acl(&rpc_request->sockid, &rpc_request->req,
                         rpc_request->uid, rpc_request->gid, &rpc_request->buf);
         } else if (req->program == NLM_PROGRAM) {
-                DINFO("NLM REQUEST\n");
+                DBUG("NLM REQUEST\n");
                 nfs_nlm4(&rpc_request->sockid, &rpc_request->req,
                          rpc_request->uid, rpc_request->gid, &rpc_request->buf);
         }else{
@@ -155,6 +153,6 @@ void nfs_newtask(const sockid_t *sockid, const sunrpc_request_t *req,
         mbuffer_init(&rpc_request->buf, 0);
         mbuffer_merge(&rpc_request->buf, buf);
 
-        schedule_task_new("sunrpc", __nfs_exec, rpc_request, 0);
+        schedule_task_new1("sunrpc", __nfs_exec, rpc_request, 0, 1);
 }
 

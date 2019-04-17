@@ -73,20 +73,20 @@ class Exp(Exception):
             exp_info += ' stdout:' + self.out
         return repr(exp_info)
 
-def _str2dict(s):
+def _str2dict(s, row='\n', col=':'):
     if len(s) == 0:
         return {}
 
-    if (s[-1] == '\n'):
+    if (s[-1] == row):
         s = s[:-1]
 
-    a = s.split('\n')
+    a = s.split(row)
     d = {}
     for i in a:
-        if ':' not in i:
+        if col not in i:
             continue
 
-        p = i.split(':')
+        p = i.split(col)
         if (d.get(p[0])):
             raise Exp(errno.EEXIST, "dup key exist")
         try:
@@ -1002,22 +1002,11 @@ def kill9_self():
     self_pid = os.getpid()
     exec_shell("kill -9 %s" % (self_pid))
 
-"""
-author : jiangyang
-date : 201703.09
-install minio.service for systemctl for centos7
-"""
-def _init_minio_c7(home):
-    src = os.path.join(home, "app/admin/minio_init_centos_7")
-    dst = "/usr/lib/systemd/system/minio.service"
-    cmd = 'cp -rf %s %s' % (src, dst)
-    os.system(cmd)
-    cmd = "chmod 644 %s" % (dst)
-    os.system(cmd)
-    cmd = "systemctl daemon-reload"
-    os.system(cmd)
 
 def _install_init_ussd(home):
+    dwarn("systemd disable\n")
+    return
+    
     (distro, release, codename) = lsb_release()
     if (distro == 'Ubuntu'):
         src = os.path.join(home, "app/admin/ussd_init_ubuntu")
@@ -1046,7 +1035,6 @@ def _install_init_ussd(home):
             os.system(cmd)
             cmd = "systemctl enable ussd.service"
             os.system(cmd)
-            _init_minio_c7(home)
         else:
             raise Exception("not support %s %s %s" % (distro, release, codename))
     else:

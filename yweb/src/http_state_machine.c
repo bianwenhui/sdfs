@@ -7,7 +7,7 @@
 
 #define DBG_SUBSYS S_YWEB
 
-#include "aiocb.h"
+
 #include "http_state_machine.h"
 #include "http_ops.h"
 #include "job_tracker.h"
@@ -245,7 +245,7 @@ int http_state_machine_get(job_t *job, char *name)
                                 break;
                         }
 
-                        ret = sdfs_getattr(&context->fileid, &http_req->stat);
+                        ret = sdfs_getattr(NULL, &context->fileid, &http_req->stat);
                         if (ret)
                                 GOTO(err_ret, ret);
 

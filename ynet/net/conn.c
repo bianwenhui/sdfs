@@ -96,41 +96,16 @@ static int __conn_close(const nid_t *nid)
         }
 #endif
 
-#if ENABLE_LOCAL_RPC
         if (net_islocal(nid)) {
                 DWARN("skip close localhost\n");
                 goto out;
         }
-#endif
 
         __faultdomain_last_update__ = 0;
         
         DINFO("close %s\n", netable_rname_nid(nid));
 
-#if __ETCD_READ_MULTI__
-        int ret;
-        char name[MAX_NAME_LEN];
-
-        if (ng.daemon) {
-                ret = network_rname1(nid, name);
-                if (ret == 0) {
-                        etcd_srv_del(name);
-                }
-        }
-#endif
-        
-#if !ENABLE_ETCD_CONN
-#if RECOVERY_IMMEDIATELY_ASYN 
-        if (ng.daemon) {
-                DBUG("force scan\n");
-                recovery_wakeup_all_pool("__conn_close");
-        }
-#endif
-#endif
-
-#if ENABLE_LOCAL_RPC
 out:
-#endif        
 
         //DERROR("__conn_close disabled\n");
         //netable_close_withrpc(NULL, nid, "offline");
@@ -151,11 +126,10 @@ static int __conn_add(const nid_t *nid)
         size_t len;
         instat_t instat;
 
-#if !ENABLE_LOCAL_RPC
-        if (net_islocal(nid)) {
+        if (netable_connected(nid)) {
+                netable_update(nid);
                 goto out;
         }
-#endif
         
         snprintf(key, MAX_NAME_LEN, "%u.info", nid->id);
 
@@ -168,10 +142,6 @@ static int __conn_add(const nid_t *nid)
         ret = urlsafe_b64_decode(tmp, strlen(tmp), (void *)info, &len);
         YASSERT(ret == 0);        
 
-        if (netable_connected(nid)) {
-                netable_update(nid);
-                goto out;
-        }
 
 #if 0
         __faultdomain_last_update__ = 0;
@@ -191,18 +161,6 @@ static int __conn_add(const nid_t *nid)
                 GOTO(err_ret, ret);
         }
 
-#if __ETCD_READ_MULTI__
-        if (ng.daemon) {
-                etcd_srv_add(info->name);
-        }
-#endif
-        
-#if RECOVERY_IMMEDIATELY_ASYN 
-        if (ng.daemon) {
-                DINFO("force scan\n");
-                recovery_wakeup_all_pool("__conn_add");
-        }
-#endif
 out:
 
         return 0;
@@ -311,7 +269,7 @@ static void *__conn_worker(void *arg)
         snprintf(key, MAX_NAME_LEN, "%s/%s", ETCD_ROOT, ETCD_CONN);
         //snprintf(key, MAX_NAME_LEN, "%s/%s", ETCD_ROOT, "test");
         while (1) {
-                ret = etcd_watch(sess, key, &idx, &node);
+                ret = etcd_watch(sess, key, &idx, &node, 0);
                 if(ret != ETCD_OK){
                         ret = EPERM;
                         GOTO(err_close, ret);
@@ -345,6 +303,17 @@ static int __conn_scan__()
         char tmp[MAX_NAME_LEN];
         nid_t nid;
 
+retry:
+        ret = network_connect_mond(1);
+        if (ret) {
+                ret = _errno(ret);
+                if (ret == EAGAIN) {
+                        sleep(5);
+                        goto retry;
+                } else
+                        GOTO(err_ret, ret);
+        }
+        
         ret = etcd_list(ETCD_CONN, &list);
         if (unlikely(ret)) {
                 if (ret == ENOKEY) {
@@ -481,7 +450,7 @@ static int __conn_init_info(nid_t *_nid)
         snprintf(key, MAX_NAME_LEN, "%u.info", nid.id);
 
 retry:
-        DINFO("register %s value %s\n", key, tmp);
+        DBUG("register %s value %s\n", key, tmp);
         ret = etcd_create_text(ETCD_CONN, key, tmp, 0);
         if (unlikely(ret)) {
                 ret = etcd_update_text(ETCD_CONN, key, tmp, NULL, 0);

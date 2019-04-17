@@ -31,76 +31,11 @@ typedef struct {
 
 static chunkop_t *chunkop = &__chunkop__;
 
-extern int md_chkunload(struct yfs_chunk *chk);
-
-/** allocate new chunk
- * @param chkrep
- * @param path
- * @param chk[in,out]
- */
-int md_chkget(const fileinfo_t *_md, chkinfo_t *chkinfo, const chkid_t *chkid,
-              const nid_t *_peer)
-{
-        int ret;
-        char buf[MAX_BUF_LEN];
-        fileinfo_t *md;
-        
-        (void) _peer;
-
-        if (_md) {
-                md = (void *)_md;
-        } else {
-                md = (void *)buf;
-
-                fileid_t fileid;
-                cid2fid(&fileid, chkid);
-                ret = md_getattr((void *)md, &fileid);
-                if (ret)
-                        GOTO(err_ret, ret);
-        }
-        
-        ret = md_chunk_create(md, chkid->idx, chkinfo);
-        if (ret)
-                GOTO(err_ret, ret);
-
-        return 0;
-err_ret:
-        return ret;
-}
-
 int md_chkload(chkinfo_t *chk, const chkid_t *chkid, const nid_t *_peer)
 {
         (void) _peer;
 
         return md_chunk_load(chkid, chk);
-}
-
-static int __md_ec_check(const chkid_t *chkid, int dirty)
-{
-        int ret;
-        char buf[MAX_BUF_LEN];
-        md_proto_t *md;
-        fileid_t fileid;
-
-        cid2fid(&fileid, chkid);
-        md = (void *)buf;
-        ret = md_getattr((void *)md, &fileid);
-        if (ret) {
-                GOTO(err_ret, ret);
-        }
-
-        if (md->plugin != PLUGIN_NULL) {
-                if (dirty > (md->m - md->k)) {
-                        DWARN(CHKID_FORMAT" md->m %d md->k %d, dirty %u\n",
-                              CHKID_ARG(chkid), md->m, md->k, dirty);
-                        ret = EBUSY;
-                        GOTO(err_ret, ret);
-                }
-        }
-
-        return 0;
-err_ret:
-        return ret;
 }
 
 static int __md_location_check(const diskid_t *id, const diskid_t *id1, int *same)
@@ -352,305 +287,6 @@ err_ret:
         return ret;
 }
 
-int md_newrep(chkinfo_t *chkinfo, const chkid_t *chkid, int lock, int flag)
-{
-        int ret;
-
-        UNIMPLEMENTED(__DUMP__);//disabled
-        
-        if (lock) {
-                ret = klock(chkid, 10, 1);
-                if (ret)
-                        GOTO(err_ret, ret);
-        }
-        
-        ret = md_chunk_load(chkid, chkinfo);
-        if (ret)
-                GOTO(err_lock, ret);
-
-        ret = __md_newrep(chkinfo, 1, flag);
-        if (ret)
-                GOTO(err_lock, ret);
-
-        ret = chunkop->update(chkinfo);
-        if (ret)
-                GOTO(err_lock, ret);
-
-        if (lock) {
-                ret = kunlock(chkid);
-                if (ret)
-                        GOTO(err_ret, ret);
-        }
-
-        return 0;
-err_lock:
-        if (lock) {
-                kunlock(chkid);
-        }
-err_ret:
-        return ret;
-}
-
-static int __md_chunk_set(const chkid_t *objid,
-                          const diskid_t *diskid, int available, chkinfo_t *chkinfo)
-{
-        int ret, done = 0, i, dirty;
-
-        dirty = 0;
-        if (available == 0) {
-                for (i = 0; i < (int)chkinfo->repnum; i++) {
-                        if (nid_cmp(&chkinfo->diskid[i], diskid) == 0) {
-                                DBUG("set object "OBJID_FORMAT" at "DISKID_FORMAT" %s\n",
-                                     OBJID_ARG(objid), DISKID_ARG(diskid),
-                                     chkinfo->diskid[i].status & __S_DIRTY ?
-                                     "dirty" : "available");
-
-                                if ((int)chkinfo->master == i) {
-                                        ret = EBUSY;
-                                        DWARN("set object "OBJID_FORMAT" at "
-                                              DISKID_FORMAT" %s fail\n",
-                                              OBJID_ARG(objid), DISKID_ARG(diskid),
-                                              available ? "dirty" : "available");
-                                        GOTO(err_ret, ret);
-                                }
-
-                                dirty++;
-                        } else if (chkinfo->diskid[i].status & __S_DIRTY)
-                                dirty++;
-                }
-
-                if (dirty == (int)chkinfo->repnum) {
-                        ret = EBUSY;
-                        DWARN("set object "OBJID_FORMAT" at "DISKID_FORMAT" %s fail\n",
-                              OBJID_ARG(objid), DISKID_ARG(diskid),
-                              available ? "dirty" : "available");
-                        GOTO(err_ret, ret);
-                }
-
-                ret = __md_ec_check(&chkinfo->chkid, dirty);
-                if (ret) {
-                        DWARN("set object "OBJID_FORMAT" at "DISKID_FORMAT" %s fail\n",
-                              OBJID_ARG(objid), DISKID_ARG(diskid),
-                              available ? "dirty" : "available");
-                        DWARN("set object chkinfo "CHKID_FORMAT" at "DISKID_FORMAT" %s fail\n",
-                              CHKID_ARG(&chkinfo->chkid), DISKID_ARG(diskid),
-                              available ? "dirty" : "available");
-                        GOTO(err_ret, ret);
-                }
-        }
-
-        for (i = 0; i < (int)chkinfo->repnum; i++) {
-                if (nid_cmp(&chkinfo->diskid[i], diskid) == 0) {
-                        if (available) {
-                                DINFO("set object "OBJID_FORMAT"rep[%u] at "
-                                      DISKID_FORMAT" available\n",
-                                      OBJID_ARG(objid), i, DISKID_ARG(diskid));
-
-                                chkinfo->diskid[i].status = chkinfo->diskid[i].status & ~(__S_DIRTY);
-                        } else {
-                                DINFO("set object "OBJID_FORMAT"rep[%u] at "
-                                      DISKID_FORMAT" dirty\n",
-                                      OBJID_ARG(objid), i, DISKID_ARG(diskid));
-                                chkinfo->diskid[i].status |=  __S_DIRTY;
-                        }
-
-                        done = 1;
-                        break;
-                }
-        }
-
-        if (done == 0) {
-                ret = ENONET;
-                DWARN("set object "OBJID_FORMAT" at "DISKID_FORMAT" %s fail\n",
-                                OBJID_ARG(objid), DISKID_ARG(diskid),
-                                available ? "dirty" : "available");
-                GOTO(err_ret, ret);
-        }
-
-        return 0;
-err_ret:
-        return ret;
-}
-
-int md_chunk_set(const chkid_t *chkid, const diskid_t *diskid,
-                 int available, chkinfo_t *chkinfo)
-{
-        int ret;
-
-        //req->op = MDP_CHKAVAILABLE;
-
-        UNIMPLEMENTED(__DUMP__);//disabled
-
-        ret = klock(chkid, 10, 1);
-        if (ret)
-                GOTO(err_ret, ret);
-        
-        ret = md_chunk_load(chkid, chkinfo);
-        if (ret)
-                GOTO(err_lock, ret);
-
-        ret = __md_chunk_set(chkid, diskid, available, chkinfo);
-        if (ret)
-                GOTO(err_lock, ret);
-
-        ret = chunkop->update(chkinfo);
-        if (ret)
-                GOTO(err_lock, ret);
-
-        ret = kunlock(chkid);
-        if (ret)
-                GOTO(err_ret, ret);
-
-        return 0;
-err_lock:
-        kunlock(chkid);
-err_ret:
-        return ret;
-}
-
-int md_chkavailable(objinfo_t *objinfo, const chkid_t *chkid,
-                    const diskid_t *diskid, int available)
-{
-        int ret;
-        char buf[MAX_BUF_LEN];
-        chkinfo_t *chkinfo;
-
-        chkinfo = (void *)buf;
-        ret = md_chunk_set(chkid, diskid, available, chkinfo);
-        if (ret)
-                GOTO(err_ret, ret);
-        
-        chk2obj(objinfo, chkinfo);
-
-        return 0;
-err_ret:
-        return ret;
-}
-
-inline static int __md_newmaster(chkinfo_t *chkinfo)
-{
-        int ret, master = -1, i, oldmaster;
-        nid_t *nid;
-        net_handle_t nh;
-        ynet_net_info_t *info;
-        char buf[MAX_BUF_LEN];
-        uint32_t buflen;
-
-        oldmaster = chkinfo->master;
-        nid = &chkinfo->diskid[chkinfo->master];
-        if (netable_connected(nid)) {
-                ret = network_connect(nid, NULL, 0, 0);
-                if (ret) {
-                        DINFO("cds "DISKID_FORMAT" dead\n", DISKID_ARG(nid));
-                        id2nh(&nh, nid);
-
-                        buflen = MAX_BUF_LEN;
-                        info = (void *)buf;
-                        ret = netable_getinfo(nid, info, &buflen);
-                        if (ret)
-                                GOTO(err_ret, ret);
-
-                        netable_put(&nh, "net timeout");
-                } else {
-                        ret = EBUSY;
-                        DINFO("chk "CHKID_FORMAT" master "DISKID_FORMAT"(%s) still alive\n", CHKID_ARG(&chkinfo->chkid),
-                                        DISKID_ARG(&chkinfo->diskid[oldmaster]),
-                                        netable_rname_nid(&chkinfo->diskid[oldmaster]));
-                        goto err_ret;
-                }
-        }
-
-        for (i = 0; i < (int)chkinfo->repnum; i++) {
-                if (chkinfo->diskid[i].status & __S_DIRTY) {
-                        DWARN("chk"OBJID_FORMAT" rep[%u] dirty %u\n", OBJID_ARG(&chkinfo->chkid),
-                                        i, chkinfo->diskid[i].status & __S_DIRTY);
-                        continue;
-                }
-
-                if (i == oldmaster)
-                        continue;
-
-                ret = network_connect(&chkinfo->diskid[i], NULL, 1, 0);
-                if (ret == 0) {
-                        master = i;
-                        break;
-                }
-        }
-
-        if (master == -1) {
-                ret = EAGAIN;
-                DWARN("chk"OBJID_FORMAT"not online\n", OBJID_ARG(&chkinfo->chkid));
-                goto err_ret;
-        }
-
-        DINFO("chk "CHKID_FORMAT" newmaster at "DISKID_FORMAT"(%s) replace "DISKID_FORMAT"\n", CHKID_ARG(&chkinfo->chkid),
-                        DISKID_ARG(&chkinfo->diskid[master]),
-                        netable_rname_nid(&chkinfo->diskid[master]),
-                        DISKID_ARG(&chkinfo->diskid[chkinfo->master]));
-
-        chkinfo->master = master;
-        //chkinfo->diskid[oldmaster].status |= __S_DIRTY;
-
-        return 0;
-err_ret:
-        return ret;
-}
-
-int md_chknewmaster(chkinfo_t *chkinfo, const chkid_t *chkid, int type)
-{
-        int ret;
-
-        (void) type;
-
-        ret = klock(chkid, 10, 1);
-        if (ret)
-                GOTO(err_ret, ret);
-        
-        ret = md_chunk_load(chkid, chkinfo);
-        if (ret)
-                GOTO(err_lock, ret);
-
-        ret = __md_newmaster(chkinfo);
-        if (ret)
-                GOTO(err_lock, ret);
-
-#if 0
-        int count = 0;
-        for (int i = 0; i < (int)chkinfo->repnum; i++) {
-                //YASSERT(chkinfo->diskid[i].status == 0);
-                if (chkinfo->diskid[i].status)
-                        count++;
-        }
-        YASSERT(count < 2);
-#endif
-        
-        ret = chunkop->update(chkinfo);
-        if (ret)
-                GOTO(err_lock, ret);
-
-        ret = kunlock(chkid);
-        if (ret)
-                GOTO(err_ret, ret);
-        
-        return 0;
-err_lock:
-        kunlock(chkid);
-err_ret:
-        return ret;
-}
-
-int md_chkunload(struct yfs_chunk *chk)
-{
-        yfree((void **)&chk->nid);
-
-        chk->nid = 0;
-        chk->chkid.id = CHKID_NULL;
-        chk->chkid.volid = CHKVOLID_NULL;
-        chk->rep = 0;
-
-        return 0;
-}
-
 static void __chkinfo_init(chkinfo_t *chkinfo, const chkid_t *chkid,
                            const diskid_t *disks, const fileinfo_t *md)
 {
@@ -670,8 +306,6 @@ int md_chunk_create(const fileinfo_t *md, uint64_t idx, chkinfo_t *chkinfo)
         diskid_t disk[YFS_CHK_REP_MAX];
         chkid_t chkid;
 
-        UNIMPLEMENTED(__NULL__);//get tier
-
         ANALYSIS_BEGIN(0);
         
         ret = allocator_new(md->repnum, 0, TIER_SSD, disk);
@@ -685,7 +319,7 @@ int md_chunk_create(const fileinfo_t *md, uint64_t idx, chkinfo_t *chkinfo)
         fid2cid(&chkid, &md->fileid, idx);
         __chkinfo_init(chkinfo, &chkid, disk, md);
 
-        ret = chunkop->create(chkinfo);
+        ret = chunkop->create(NULL, chkinfo);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -699,8 +333,8 @@ err_ret:
 int md_chunk_load(const chkid_t *chkid, chkinfo_t *chkinfo)
 {
         int ret;
-        
-        ret = chunkop->load(chkid, chkinfo);
+
+        ret = chunkop->load(NULL, chkid, chkinfo);
         if (ret)
                 GOTO(err_ret, ret);
         
@@ -781,7 +415,7 @@ static int __md_chunk_load_slow(const chkid_t *chkid, chkinfo_t *chkinfo, int re
 {
         int ret;
 
-        ret = klock(chkid, 10, 1);
+        ret = klock(NULL, chkid, 10, 1);
         if (unlikely(ret))
                 GOTO(err_ret, ret);
         
@@ -802,18 +436,18 @@ static int __md_chunk_load_slow(const chkid_t *chkid, chkinfo_t *chkinfo, int re
         }
         YASSERT(count < 2);
 #endif
-        
-        ret = chunkop->update(chkinfo);
+
+        ret = chunkop->update(NULL, chkinfo);
         if (ret)
                 GOTO(err_lock, ret);
 
-        ret = kunlock(chkid);
+        ret = kunlock(NULL, chkid);
         if (unlikely(ret))
                 GOTO(err_ret, ret);
 
         return 0;
 err_lock:
-        kunlock(chkid);
+        kunlock(NULL, chkid);
 err_ret:
         return ret;
 }
@@ -872,8 +506,8 @@ int md_chunk_update(const chkinfo_t *chkinfo)
                 YASSERT(chkinfo->diskid[i].status == 0);
         }
 #endif
-        
-        ret = chunkop->update(chkinfo);
+
+        ret = chunkop->update(NULL, chkinfo);
         if (ret)
                 GOTO(err_ret, ret);
 

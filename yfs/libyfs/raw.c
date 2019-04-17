@@ -7,7 +7,7 @@
 #define DBG_SUBSYS S_YFSLIB
 
 #include "sdfs_id.h"
-#include "aiocb.h"
+
 #include "md_lib.h"
 #include "chk_proto.h"
 #include "network.h"
@@ -64,11 +64,6 @@ int normalize_path(const char *path, char *path2) {
 
         path2[off] = '\0';
         return 0;
-}
-
-int raw_readdirplus_count(const fileid_t *fileid, file_statis_t *file_statis)
-{
-        return md_readdirplus_count(fileid, file_statis);
 }
 
 #if ENABLE_WORM
@@ -183,14 +178,14 @@ int raw_printfile(fileid_t *fileid, uint32_t _chkno)
         md = (void *)buf;
         chkinfo = (void *)buf1;
 
-        ret = md_getattr((void *)md, fileid);
+        ret = md_getattr(NULL, fileid, (void *)md);
         if (ret)
                 GOTO(err_ret, ret);
 
         snprintf(key, MAX_BUF_LEN, USS_SYSTEM_ATTR_ENGINE);
         id2vid(fileid->volid, &volume_dir_id);
         size = sizeof(value);
-        ret = sdfs_getxattr(&volume_dir_id, key, value, &size);
+        ret = sdfs_getxattr(NULL, &volume_dir_id, key, value, &size);
         if (0 == ret) {
         }
 
@@ -273,7 +268,7 @@ int raw_printfile1(fileid_t *fileid)
         md = (void *)buf;
         chkinfo = (void *)buf1;
 
-        ret = md_getattr((void *)md, fileid);
+        ret = md_getattr(NULL, fileid, (void *)md);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -322,7 +317,7 @@ int raw_is_dir(const fileid_t *fileid, int *is_dir)
         int ret;
         struct stat stbuf;
 
-        ret = sdfs_getattr(fileid, &stbuf);
+        ret = sdfs_getattr(NULL, fileid, &stbuf);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -347,7 +342,7 @@ int raw_is_directory_empty(const fileid_t *fileid, int *is_empty)
                 GOTO(err_ret, ret);
         }
 
-        ret = md_childcount(fileid, &count);
+        ret = md_childcount(NULL, fileid, &count);
         if (ret)
                 GOTO(err_ret, ret);
 

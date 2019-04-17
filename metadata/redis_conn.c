@@ -6,53 +6,55 @@
 #include "redis_conn.h"
 #include "redis.h"
 #include "configure.h"
-#include "dbg.h"
 #include "adt.h"
 #include "net_global.h"
 #include "schedule.h"
 #include "cJSON.h"
 #include "sdfs_conf.h"
 #include "math.h"
-
-typedef struct{
-        int magic;
-        int erased;
-        int used;
-        redis_conn_t *conn;
-} __conn_t;
-
-typedef struct{
-        sy_rwlock_t lock;
-        int sequence;
-        int count;
-        __conn_t *conn;
-} __conn_sharding_t;
-
-typedef struct {
-        sy_rwlock_t lock;
-        int sequence;
-        int sharding;
-        __conn_sharding_t *shardings;
-        uint64_t volid;
-        char volume[MAX_NAME_LEN];
-} redis_vol_t;
+#include "maping.h"
+#include "dbg.h"
 
 //static redis_vol_t *__conn__;
 static int __conn_magic__ = 0;
+extern int __redis_conn_pool__;
+extern int __use_pipeline__;
+extern __thread int __use_co__;
 
-static int __redis_vol_get(uint64_t volid, redis_vol_t **_vol, int flag);
+static int __redis_vol_get(const volid_t *volid, redis_vol_t **_vol, int flag);
 
 
 static int __redis_connect(const char *volume, int sharding, int magic, __conn_t *conn)
 {
         int ret, count;
-        char addr[MAX_BUF_LEN], key[MAX_BUF_LEN];
+        char addr[MAX_BUF_LEN], key[MAX_BUF_LEN], id[MAX_NAME_LEN];
         char *list[2];
+        time_t ctime;
 
         snprintf(key, MAX_NAME_LEN, "%s/slot/%d/master", volume, sharding);
-        ret = etcd_get_text(ETCD_VOLUME, key, addr, NULL);
-        if(ret)
-                GOTO(err_ret, ret);
+        snprintf(id, MAX_NAME_LEN, "%s/%d", volume, sharding);
+        ret = maping_get(NAME2ADDR, id, addr, &ctime);
+        if(ret) {
+                if (ret == ENOENT) {
+                retry:
+                        ret = etcd_get_text(ETCD_VOLUME, key, addr, NULL);
+                        if(ret) {
+                                DBUG("%s not found\n", key);
+                                GOTO(err_ret, ret);
+                        }
+
+                        ret = maping_set(NAME2ADDR, id, addr);
+                        if(ret)
+                                GOTO(err_ret, ret);
+                } else
+                        GOTO(err_ret, ret);
+        } else {
+                DBUG("found %s, %s\n", id, addr);
+                if (time(NULL) - ctime > 5) {
+                        DBUG("%s, %s, time expired\n", id, addr);
+                        goto retry;
+                }
+        }
 
         count = 2;
         _str_split(addr, ' ', list, &count);
@@ -61,12 +63,15 @@ static int __redis_connect(const char *volume, int sharding, int magic, __conn_t
                 GOTO(err_ret, ret);
         }
 
-        DINFO("get volume %s sharding[%d] master @ %s:%s\n", volume, sharding, list[0], list[1]);
+        DBUG("get volume %s sharding[%d] master @ %s:%s\n", volume, sharding, list[0], list[1]);
 
         int port = atoi(list[1]);
-        ret = redis_connect(&conn->conn, list[0], &port);
-        if(ret)
+        ret = redis_connect(&conn->conn, list[0], &port, key);
+        if(ret) {
+                DWARN("connect volume %s sharding[%d] master @ %s:%s fail\n",
+                      volume, sharding, list[0], list[1]);
                 GOTO(err_ret, ret);
+        }
 
         conn->magic = magic;
         conn->used = 0;
@@ -101,11 +106,12 @@ inline static int __redis_connect_sharding(const char *volume, __conn_sharding_t
         int ret, count, i;
         __conn_t *conn;
 
-#if 1
-        count = ng.daemon ? REDIS_CONN_POOL : 1;
+#if 0
+        count = __use_co__ ? 1 : __redis_conn_pool__;
 #else
-        count = REDIS_CONN_POOL;
+        count = __redis_conn_pool__;
 #endif
+        YASSERT(count);
 
         ret = ymalloc((void **)&conn, sizeof(*conn) * count);
         if(ret)
@@ -119,6 +125,7 @@ inline static int __redis_connect_sharding(const char *volume, __conn_sharding_t
 
         sharding->count = count;
         sharding->conn = conn;
+        YASSERT(conn);
 
         DINFO("redis sharding[%u] conn %u connected\n", idx, count);
 
@@ -129,7 +136,8 @@ err_ret:
         return ret;
 }
 
-static int __redis_vol_connect(uint64_t volid, const char *volume, int sharding, redis_vol_t **_vol)
+static int __redis_vol_connect(const volid_t *volid, const char *volume, int sharding,
+                               redis_vol_t **_vol)
 {
         int ret, i, retry = 0;
         redis_vol_t *vol;
@@ -140,22 +148,24 @@ static int __redis_vol_connect(uint64_t volid, const char *volume, int sharding,
         if(ret)
                 GOTO(err_ret, ret);
 
-        DINFO("connect to vol %d, sharding %u\n", volid, sharding);
+        DINFO("connect to vol %d, sharding %u\n", volid->volid, sharding);
         
         vol->sharding = sharding;
-        vol->volid = volid;
+        vol->volid = *volid;
         strcpy(vol->volume, volume);
 
+        YASSERT(vol->sharding);
+        
         ret = ymalloc((void **)&vol->shardings, sizeof(*vol->shardings) * vol->sharding);
         if(ret)
                 UNIMPLEMENTED(__DUMP__);
 
-        ret = sy_rwlock_init(&vol->lock, NULL);
+        ret = pthread_rwlock_init(&vol->lock, NULL);
         if(ret)
                 UNIMPLEMENTED(__DUMP__);
         
         for (i = 0; i < vol->sharding; i++) {
-                ret = sy_rwlock_init(&vol->shardings[i].lock, NULL);
+                ret = pthread_rwlock_init(&vol->shardings[i].lock, NULL);
                 if(ret)
                         UNIMPLEMENTED(__DUMP__);
 
@@ -184,6 +194,8 @@ static int __redis_conn_get__(__conn_t *conn, redis_handler_t *handler)
 {
         int ret;
 
+        YASSERT(conn);
+        
         if (conn->conn == NULL) {
                 ret = ENOENT;
                 GOTO(err_ret, ret);
@@ -194,9 +206,13 @@ static int __redis_conn_get__(__conn_t *conn, redis_handler_t *handler)
                 GOTO(err_ret, ret);
         }
 
+        if (__use_co__) {
+                YASSERT(conn->used == 0);
+        }
+                
         if (conn->used) {
                 ret = EBUSY;
-                goto err_ret;
+                GOTO(err_ret, ret);
         }
 
         conn->used = 1;
@@ -208,70 +224,65 @@ err_ret:
         return ret;
 }
 
-static int __redis_conn_get_sharding(__conn_sharding_t *sharding, redis_handler_t *handler)
+static int __redis_conn_get_sharding(__conn_sharding_t *sharding, int worker,
+                                     redis_handler_t *handler)
 {
-        int ret, i, idx, retry = 0;
+        int ret, idx;
 
-retry:
-        ret = sy_rwlock_wrlock(&sharding->lock);
+        ret = pthread_rwlock_wrlock(&sharding->lock);
         if(ret)
                 GOTO(err_ret, ret);
 
-        sharding->sequence++;
-        for (i = 0; i < sharding->count; i++) {
-                idx = (i + sharding->sequence) % sharding->count;
-                
-                ret = __redis_conn_get__(&sharding->conn[idx], handler);
-                if(ret)
-                        continue;
+        //YASSERT(worker <= sharding->count && worker >= 0);
+        idx = worker % __redis_conn_pool__;
+        YASSERT(sharding->conn);
+        ret = __redis_conn_get__(&sharding->conn[idx], handler);
+        if(ret)
+                GOTO(err_lock, ret);
 
-                handler->idx = idx;
-                break;
-        }
+        handler->idx = idx;
 
-        sy_rwlock_unlock(&sharding->lock);
-        
-        if (i == sharding->count) {
-                ret = ENONET;
-                USLEEP_RETRY(err_ret, ret, retry, retry, 1000, (1000));
-        }
+        pthread_rwlock_unlock(&sharding->lock);
         
         return 0;
-//err_lock:
-//        sy_rwlock_unlock(&sharding->lock);
+err_lock:
+        pthread_rwlock_unlock(&sharding->lock);
 err_ret:
         return ret;
 }
 
-int redis_conn_get(uint64_t volid, int sharding, redis_handler_t *handler)
+int redis_conn_get(const volid_t *volid, int sharding, uint32_t worker,
+                   redis_handler_t *handler)
 {
         int ret, idx;
         redis_vol_t *vol;
 
+        //YASSERT(!schedule_running());
+        
         ret = __redis_vol_get(volid, &vol, O_CREAT);
         if(ret)
                 GOTO(err_ret, ret);
         
-        ret = sy_rwlock_rdlock(&vol->lock);
+        ret = pthread_rwlock_rdlock(&vol->lock);
         if(ret)
                 GOTO(err_release, ret);
 
         idx = sharding % vol->sharding;
         handler->sharding = idx;
-        ret = __redis_conn_get_sharding(&vol->shardings[handler->sharding], handler);
+        ret = __redis_conn_get_sharding(&vol->shardings[handler->sharding], worker, handler);
         if(ret)
                 GOTO(err_lock, ret);
 
-        handler->volid = volid;
+        handler->volid = *volid;
         
-        sy_rwlock_unlock(&vol->lock);
+        pthread_rwlock_unlock(&vol->lock);
         redis_vol_release(volid);
         
         DBUG("use vol (%d,%d)\n", handler->sharding, handler->idx);
 
         return 0;
 err_lock:
-        sy_rwlock_unlock(&vol->lock);
+        pthread_rwlock_unlock(&vol->lock);
 err_release:
         redis_vol_release(volid);
 err_ret:
@@ -284,7 +295,7 @@ static int __redis_conn_release__(const char *volume, __conn_sharding_t *shardin
         int ret;
         __conn_t *conn;
 
-        ret = sy_rwlock_wrlock(&sharding->lock);
+        ret = pthread_rwlock_wrlock(&sharding->lock);
         if(ret)
                 GOTO(err_ret, ret);
 
@@ -304,11 +315,11 @@ static int __redis_conn_release__(const char *volume, __conn_sharding_t *shardin
                 }
         }
 
-        sy_rwlock_unlock(&sharding->lock);
+        pthread_rwlock_unlock(&sharding->lock);
 
         return 0;
 err_lock:
-        sy_rwlock_unlock(&sharding->lock);
+        pthread_rwlock_unlock(&sharding->lock);
 err_ret:
         return ret;
 }
@@ -318,11 +329,11 @@ int redis_conn_release(const redis_handler_t *handler)
         int ret;
         redis_vol_t *vol;
 
-        ret = __redis_vol_get(handler->volid, &vol, 0);
+        ret = __redis_vol_get(&handler->volid, &vol, 0);
         if(ret)
                 GOTO(err_ret, ret);
         
-        ret = sy_rwlock_rdlock(&vol->lock);
+        ret = pthread_rwlock_rdlock(&vol->lock);
         if(ret)
                 GOTO(err_release, ret);
 
@@ -330,21 +341,21 @@ int redis_conn_release(const redis_handler_t *handler)
         if(ret)
                 GOTO(err_lock, ret);
 
-        sy_rwlock_unlock(&vol->lock);
-        redis_vol_release(handler->volid);
+        pthread_rwlock_unlock(&vol->lock);
+        redis_vol_release(&handler->volid);
 
         DBUG("release vol (%d,%d)\n", handler->sharding, handler->idx);
         
         return 0;
 err_lock:
-        sy_rwlock_unlock(&vol->lock);
+        pthread_rwlock_unlock(&vol->lock);
 err_release:
-        redis_vol_release(handler->volid);
+        redis_vol_release(&handler->volid);
 err_ret:
         return ret;
 }
 
-int redis_conn_new(uint64_t volid, uint8_t *idx)
+static int __redis_conn_new__(const volid_t *volid, uint8_t *idx)
 {
         int ret, seq;
         redis_vol_t *vol;
@@ -376,12 +387,46 @@ err_ret:
         return ret;
 }
 
+static int __redis_conn_new(va_list ap)
+{
+        const volid_t *volid = va_arg(ap, const volid_t *);
+        uint8_t *idx = va_arg(ap, uint8_t *);
+
+        va_end(ap);
+
+        return __redis_conn_new__(volid, idx);
+}
+
+
+int redis_conn_new(const volid_t *volid, uint8_t *idx)
+{
+        int ret;
+
+        ANALYSIS_BEGIN(0);
+        
+        if (schedule_running()) {
+                ret = schedule_newthread(SCHE_THREAD_ETCD, ++__conn_magic__, FALSE,
+                                          "redis newid", -1, __redis_conn_new, volid, idx);
+        } else {
+                ret = __redis_conn_new__(volid, idx);
+        }
+        if (ret)
+                GOTO(err_ret, ret);
+
+        
+        ANALYSIS_END(0, IO_WARN, NULL);
+
+        return 0;
+err_ret:
+        return ret;
+}
+
 static int __redis_conn_close__(__conn_sharding_t *sharding, const redis_handler_t *handler)
 {
         int ret;
         __conn_t *conn;
 
-        ret = sy_rwlock_wrlock(&sharding->lock);
+        ret = pthread_rwlock_wrlock(&sharding->lock);
         if(ret)
                 GOTO(err_ret, ret);
 
@@ -393,7 +438,7 @@ static int __redis_conn_close__(__conn_sharding_t *sharding, const redis_handler
                 conn->erased = 1;
         }
 
-        sy_rwlock_unlock(&sharding->lock);
+        pthread_rwlock_unlock(&sharding->lock);
         
         return 0;
 err_ret:
@@ -405,11 +450,11 @@ int redis_conn_close(const redis_handler_t *handler)
         int ret;
         redis_vol_t *vol;
  
-        ret = __redis_vol_get(handler->volid, &vol, 0);
+        ret = __redis_vol_get(&handler->volid, &vol, 0);
         if(ret)
                 GOTO(err_ret, ret);
                
-        ret = sy_rwlock_rdlock(&vol->lock);
+        ret = pthread_rwlock_rdlock(&vol->lock);
         if(ret)
                 GOTO(err_release, ret);
 
@@ -417,14 +462,14 @@ int redis_conn_close(const redis_handler_t *handler)
         if(ret)
                 GOTO(err_lock, ret);
         
-        sy_rwlock_unlock(&vol->lock);
-        redis_vol_release(handler->volid);
+        pthread_rwlock_unlock(&vol->lock);
+        redis_vol_release(&handler->volid);
         
         return 0;
 err_lock:
-        sy_rwlock_unlock(&vol->lock);
+        pthread_rwlock_unlock(&vol->lock);
 err_release:
-        redis_vol_release(handler->volid);
+        redis_vol_release(&handler->volid);
 err_ret:
         return ret;
 }
@@ -442,13 +487,27 @@ err_ret:
         return ret;
 }
 
-static int __redis_vol_getnamebyid(uint64_t _volid, char *volume, int *sharding)
+static int __redis_vol_getnamebyid(const volid_t *_volid,
+                                   char *volume, int *sharding)
 {
         int ret, i;
         char *name;
-        char key[MAX_NAME_LEN], value[MAX_BUF_LEN];
-        uint64_t volid;
+        char key[MAX_NAME_LEN], value[MAX_BUF_LEN], id[MAX_NAME_LEN], buf[MAX_BUF_LEN];
         etcd_node_t *array, *node;
+
+        snprintf(id, MAX_NAME_LEN, "%ju_%ju", _volid->volid, _volid->snapvers);
+        ret = maping_get(ID2NAME, id, buf, NULL);
+        if(ret) {
+                if (ret == ENOENT) {
+                        //pass
+                } else
+                        GOTO(err_ret, ret);
+        } else {
+                ret = sscanf(buf, "%[^,],%d", volume, sharding);
+                DBUG("found %s\n", volume);
+                YASSERT(ret == 2);
+                goto out;
+        }
         
         ret = etcd_list(ETCD_VOLUME, &array);
         if(ret)
@@ -464,8 +523,17 @@ static int __redis_vol_getnamebyid(uint64_t _volid, char *volume, int *sharding)
                 if(ret)
                         continue;
 
-                volid = atol(value);
-                if (volid == _volid) {
+                uint64_t volid = atol(value);
+
+                snprintf(key, MAX_NAME_LEN, "%s/snapvers", name);
+                DBUG("key %s\n", key);
+                ret = etcd_get_text(ETCD_VOLUME, key, value, NULL);
+                if(ret)
+                        continue;
+
+                uint64_t snapvers = atol(value);
+                
+                if (volid == _volid->volid && snapvers == _volid->snapvers) {
                         strcpy(volume, name);
 
                         snprintf(key, MAX_NAME_LEN, "%s/sharding", name);
@@ -478,13 +546,20 @@ static int __redis_vol_getnamebyid(uint64_t _volid, char *volume, int *sharding)
                         break;
                 }
         }        
+
         if (i == array->num_node) {
                 ret = ENOENT;
                 GOTO(err_free, ret);
         }
 
         free_etcd_node(array);
+
+        snprintf(buf, MAX_NAME_LEN, "%s,%u", volume, *sharding);
+        ret = maping_set(ID2NAME, id, buf);
+        if(ret)
+                GOTO(err_ret, ret);
         
+out:
         return 0;
 err_free:
         free_etcd_node(array);
@@ -506,19 +581,21 @@ static void __redis_close_sharding(__conn_sharding_t *sharding)
         yfree((void **)&sharding->conn);
 }
 
-static void __redis_vol_close(redis_vol_t *vol)
+void redis_conn_vol_close(void *_vol)
 {
         int i;
+        redis_vol_t *vol = _vol;
 
         for (i = 0; i < vol->sharding; i++) {
                 __redis_close_sharding(&vol->shardings[i]);
         }
 
+        YASSERT(vol->sharding);
         yfree((void **)&vol->shardings);
         yfree((void **)&vol);
 }
 
-int redis_conn_vol(uint64_t volid)
+int redis_conn_vol(const volid_t *volid)
 {
         int ret, sharding;
         char volume[MAX_NAME_LEN];
@@ -527,11 +604,13 @@ int redis_conn_vol(uint64_t volid)
         ret = __redis_vol_getnamebyid(volid, volume, &sharding);
         if(ret)
                 GOTO(err_ret, ret);
-
+        
         ret = __redis_vol_connect(volid, volume, sharding, &vol);
         if(ret)
                 GOTO(err_ret, ret);
 
+        YASSERT(vol->sharding);
+        YASSERT(vol->shardings);
         ret = redis_vol_insert(volid, vol);
         if(ret) {
                 GOTO(err_close, ret);
@@ -539,12 +618,12 @@ int redis_conn_vol(uint64_t volid)
 
         return 0;
 err_close:
-        __redis_vol_close(vol);
+        redis_conn_vol_close(vol);
 err_ret:
         return ret;
 }
 
-static int __redis_vol_get(uint64_t volid, redis_vol_t **_vol, int flag)
+static int __redis_vol_get(const volid_t *volid, redis_vol_t **_vol, int flag)
 {
         int ret;
 

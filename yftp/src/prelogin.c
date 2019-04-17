@@ -19,7 +19,8 @@
 #include "dbg.h"
 #include "cJSON.h"
 #include "xattr.h"
-#include "share.h"
+#include "sdfs_share.h"
+#include "schedule.h"
 #include "md_lib.h"
 
 int emit_greeting(struct yftp_session *ys)
@@ -62,7 +63,7 @@ err_ret:
 static int handle_login_internal(const char *username, const char *passwd,
                 uint32_t *mode, char *fakedir)
 {
-        int ret, retry, retry_max;
+        int ret, retry;
         user_t user_info;
         fileid_t dirid;
         share_ftp_t *share_info = NULL;
@@ -72,13 +73,12 @@ static int handle_login_internal(const char *username, const char *passwd,
 
         /* 根据用户名获取Password */
         retry = 0;
-        retry_max = 30;
 retry:
         ret = user_get(username, &user_info);
         if(ret){
                 if (NEED_EAGAIN(ret)) {
-                        network_connect_master();
-                        SLEEP_RETRY3(err_ret, ret, retry, retry, retry_max);
+                        network_connect_mond(0);
+                        USLEEP_RETRY(err_ret, ret, retry, retry, 30, (1000 * 1000));
                 } else {
                         ret = EINVAL;
                         GOTO(err_ret, ret);
@@ -313,7 +313,7 @@ int handle_addu(struct yftp_session *ys)
                 GOTO(err_ret, ret);
         }
 
-        ret = sdfs_create(&fileidp, name, &fileid, 0755, 0, 0);
+        ret = sdfs_create(NULL, &fileidp, name, &fileid, 0755, 0, 0);
         if (ret) {
                 DBUG("useradd ret (%d)\n", ret);
                 cmdio_write(ys, FTP_USEREXIST, "user exist");
@@ -321,7 +321,7 @@ int handle_addu(struct yftp_session *ys)
         }
 
         size = strlen(passwd) + 1;
-        ret = sdfs_setxattr(&fileid, name + 1, passwd, size, USS_XATTR_CREATE);
+        ret = sdfs_setxattr(NULL, &fileid, name + 1, passwd, size, USS_XATTR_CREATE);
         if (ret) {
                 DBUG("useradd ret (%d)\n", ret);
                 cmdio_write(ys, FTP_USEREXIST, "user exist");

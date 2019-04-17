@@ -9,10 +9,15 @@ import logging, pprint
 import argparse
 import errno
 
+from utils import _check_config
+from config import Config
+
 #logging.basicConfig(level=logging.DEBUG)
 
 SERVICE = 'org.ganesha.nfsd'
 CONF_PATH = "/etc/ganesha/ganesha.conf"
+
+config = Config(load_config=True)
 
 def status_message(status, errormsg):
     print "Returns: status = %s, %s" % (str(status), errormsg)
@@ -37,7 +42,7 @@ def modify_file(filename, data):
 def get_content_as_list():
     delimeter = "-------------------------------------------------------------\n"
     list_record = []
-    _exec = "/opt/sdfs/app/bin/uss.share -l -p nfs"
+    _exec = "/opt/sdfs/app/bin/sdfs.share -l -p nfs"
     try:
         result, err = exec_shell(_exec, p=True, need_return=True, timeout=60)
     except Exception as e:
@@ -58,8 +63,8 @@ def get_export(list_record):
         if len(record) == 0:
             continue
         export_path = record.split('\n')[1].split(':')[1].strip(' ')
-        clients = record.split('\n')[3].split(':')[1].strip(' ')
-        access_type = record.split('\n')[4].split(':')[1].strip(' ')
+        clients = record.split('\n')[5].split(':')[1].strip(' ')
+        access_type = record.split('\n')[6].split(':')[1].strip(' ')
         client_pair["Clients"] = clients
         access_pair["Access_Type"] = access_type
         client_list.update(client_pair)
@@ -123,7 +128,11 @@ def get_max_export_id(content):
 
 def build_common_param(export_path):
     keys_list = ['Path', 'Pseudo',  'Access_Type', 'Squash', 'Disable_Acl', 'Protocols']
-    values_list = [export_path, export_path, 'RO', 'No_Root_Squash', 'True', '3']
+    prot = '4'
+    if (config.nfs_srv != 'native'):
+        prot = '3,4'
+    #print (config.nfs_srv, prot)
+    values_list = [export_path, export_path, 'RO', 'No_Root_Squash', 'True', prot]
 
     pairs = zip(keys_list, values_list)
 
@@ -140,8 +149,10 @@ def build_fsal_block(export_id):
     return export_block
 
 def build_fsal_param():
-    keys_list = ['Name', 'volpath']
-    values_list = ['USS', '/home']
+    #keys_list = ['Name', 'volpath']
+    #values_list = ['USS', '/home']
+    keys_list = ['Name']
+    values_list = ['USS']
 
     fsal_pairs = zip(keys_list, values_list)
 
@@ -310,6 +321,16 @@ def delete_client_by_host(content, export_id, host):
         sys.exit(e.error)
     modify_file(CONF_PATH, new)
 
+
+def disable_nfs3():
+    prot = '4'
+    if (config.nfs_srv != 'native'):
+        prot = '3,4'
+
+    #print (config.nfs_srv, prot)
+    _check_config("/etc/ganesha/ganesha.conf", "NFS_Core_Param", " ", '{NFS_Protocols = %s;}' % (prot), 1)
+    
+    
 #  通过是否可以导出目录，
 #  判断nfs是否正常启动
 def nfs_running():
@@ -348,7 +369,8 @@ if __name__ == "__main__":
 
         set_conf(CONF_PATH, export_list)
         del_conf(CONF_PATH, export_list)
-        enable_export()
+        disable_nfs3()
+        #enable_export()
     parser_load = subparsers.add_parser('load', help='load config')
     parser_load.set_defaults(func=_load)
 

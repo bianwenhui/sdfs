@@ -15,13 +15,13 @@
 
 #define DBG_SUBSYS S_YFSLIB
 
-#include "shm.h"
 #include "yfs_conf.h"
 #include "etcd.h"
 #include "network.h"
 #include "allocator.h"
 #include "mond_rpc.h"
 #include "sysutil.h"
+#include "net_table.h"
 #include "ylib.h"
 #include "dbg.h"
 
@@ -227,7 +227,7 @@ static void *__allocator_worker(void *arg)
         snprintf(key, MAX_NAME_LEN, "%s/%s/diskmap", ETCD_ROOT, ETCD_DISKMAP);
         DINFO("watch %s idx %u\n", key, idx);
         while (1) {
-                ret = etcd_watch(sess, key, &idx, &node);
+                ret = etcd_watch(sess, key, &idx, &node, 0);
                 if(ret != ETCD_OK){
                         if (ret == ETCD_ENOENT) {
                                 DWARN("%s not exist\n");
@@ -284,7 +284,7 @@ static void __allocator_new_disk(allocator_node_t *node, nid_t *nid)
         node->cursor++;
 }
 
-int allocator_new(int repnum, int hardend, int tier, nid_t *disks)
+static int __allocator_new(int repnum, int hardend, int tier, nid_t *disks)
 {
         int ret;
         allocator_t *allocator = __allocator__;
@@ -297,7 +297,7 @@ int allocator_new(int repnum, int hardend, int tier, nid_t *disks)
         (void) tier;
         
 #if 1
-        if (__allocator__ == NULL) {
+        if (__allocator__ == NULL || gloconf.solomode) {
                 return mond_rpc_newdisk(net_getnid(), tier, repnum, hardend, disks);
         }
 #endif
@@ -329,6 +329,33 @@ err_ret:
         return ret;
 }
 
+int allocator_new(int repnum, int hardend, int tier, nid_t *disks)
+{
+#if ENABLE_ALLOCATE_BALANCE
+        int ret;
+        nid_t array[16];
+
+        YASSERT(repnum + 1 < 16);
+
+        ret = __allocator_new(repnum + 1, hardend, tier, array);
+        if (ret) {
+                if (ret == ENOSPC) {
+                        return __allocator_new(repnum, hardend, tier, disks);
+                } else {
+                        GOTO(err_ret, ret);
+                }
+        }
+
+        netable_sort(array, repnum + 1);
+        memcpy(disks, array, sizeof(nid_t) * repnum);
+        
+        return 0;
+err_ret:
+        return ret;
+#else
+        return  __allocator_new(repnum, hardend, tier, disks);
+#endif
+}
 
 #if 0
 int allocator_register()

@@ -8,7 +8,7 @@
 #include "job_dock.h"
 #include "net_global.h"
 #include "ylib.h"
-#include "redis_conn.h"
+#include "redis.h"
 #include "md_proto.h"
 #include "md_lib.h"
 #include "md_db.h"
@@ -199,7 +199,15 @@ void md_attr_update(md_proto_t *md, const setattr_t *setattr)
         }
 
         if (setattr->size.set_it) {
-                md->at_size = setattr->size.size;
+                if (setattr->size.set_it == __SET_TRUNCATE) {
+                        md->at_size = setattr->size.size;
+                        DBUG("truncate "CHKID_FORMAT" %u\n",
+                              CHKID_ARG(&md->fileid), md->at_size);
+                } else if (setattr->size.set_it == __SET_EXTERN) {
+                        md->at_size = setattr->size.size > md->at_size
+                                ? setattr->size.size : md->at_size;
+                }
+
                 md->chknum = _get_chknum(md->at_size, md->split);
                 changed = 1;
         }
@@ -241,6 +249,10 @@ void md_attr_update(md_proto_t *md, const setattr_t *setattr)
                 clock_gettime(CLOCK_REALTIME, &md->at_mtime);
         } else if (setattr->mtime.set_it == __SET_TO_CLIENT_TIME) {
                 md->at_mtime = setattr->mtime.time;
+        }
+
+        if (changed) {
+                md->md_version++;
         }
 }
 
@@ -312,11 +324,13 @@ err_ret:
         return ret;
 }
 
-int md_attr_getid(fileid_t *fileid, const fileid_t *parent, ftype_t type, const uint64_t *volid)
+int md_attr_getid(fileid_t *fileid, const fileid_t *parent, ftype_t type, const volid_t *volid)
 {
         int ret;
         uint64_t id;
 
+        (void) parent;
+        
         ANALYSIS_BEGIN(0);
         
         ret = md_newid(idtype_fileid, &id);
@@ -324,38 +338,28 @@ int md_attr_getid(fileid_t *fileid, const fileid_t *parent, ftype_t type, const 
                 GOTO(err_ret, ret);
 
         if (volid) {
-                YASSERT(parent == NULL);
-                fileid->volid = *volid;
+                fileid->volid = volid->volid;
                 fileid->idx = 0;
                 fileid->id = id;
 
-                ret = redis_conn_new(*volid, &fileid->sharding);
+                ret = redis_new_sharding(volid, &fileid->sharding);
                 if (ret)
                         GOTO(err_ret, ret);
         } else {
-                if (parent) {
-                        fileid->volid = parent->volid;
-                        fileid->idx = 0;
-                        fileid->id = id;
-                        ret = redis_conn_new(parent->volid, &fileid->sharding);
-                        if (ret)
-                                GOTO(err_ret, ret);
-                } else {
-                        uint64_t systemvol;
-                        ret = md_system_volid(&systemvol);
+                uint64_t systemvol;
+                ret = md_system_volid(&systemvol);
                         
-                        fileid->volid = systemvol;
-                        fileid->idx = 0;
-                        fileid->id = id;
-                        ret = redis_conn_new(systemvol, &fileid->sharding);
-                        if (ret)
-                                GOTO(err_ret, ret);
-                }                        
+                fileid->volid = systemvol;
+                fileid->idx = 0;
+                fileid->id = id;
+                volid_t _volid = {systemvol, 0};
+                ret = redis_new_sharding(&_volid, &fileid->sharding);
+                if (ret)
+                        GOTO(err_ret, ret);
         }
 
         fileid->type = type;
         fileid->__pad__ = 0;
-        fileid->snapvers = 0;
 
         DBUG("create "CHKID_FORMAT" @ sharding[%u]\n", CHKID_ARG(fileid), fileid->sharding);
 

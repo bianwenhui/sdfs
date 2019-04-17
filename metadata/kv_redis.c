@@ -21,7 +21,8 @@ static int __kv_get(root_type_t type, const char *key, void *value, size_t *len)
 
         fileid = *md_root_getid(type);
 
-        ret = hget(&fileid, key, value, len);
+        volid_t volid = {fileid.volid, 0};
+        ret = hget(&volid, &fileid, key, value, len);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -37,7 +38,8 @@ static int __kv_create(root_type_t type, const char *key, const void *value, siz
 
         fileid = *md_root_getid(type);
 
-        ret = hset(&fileid, key, value, len, O_EXCL);
+        volid_t volid = {fileid.volid, 0};
+        ret = hset(&volid, &fileid, key, value, len, O_EXCL);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -54,7 +56,8 @@ static int __kv_update(root_type_t type, const char *key, const void *value, siz
 
         fileid = *md_root_getid(type);
 
-        ret = hset(&fileid, key, value, len, 0);
+        volid_t volid = {fileid.volid, 0};
+        ret = hset(&volid, &fileid, key, value, len, 0);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -70,7 +73,8 @@ static int __kv_remove(root_type_t type, const char *key)
 
         fileid = *md_root_getid(type);
 
-        ret = hdel(&fileid, key);
+        volid_t volid = {fileid.volid, 0};
+        ret = hdel(&volid, &fileid, key);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -85,7 +89,8 @@ static redisReply *__kv_scan(root_type_t type, const char *match, uint64_t offse
 
         fileid = *md_root_getid(type);
 
-        return hscan(&fileid, match, offset, -1);
+        volid_t volid = {fileid.volid, 0};
+        return hscan(&volid, &fileid, match, offset, -1);
 }
 
 static int __kv_iter(root_type_t type, const char *match, func2_t func, void *ctx)
@@ -95,7 +100,8 @@ static int __kv_iter(root_type_t type, const char *match, func2_t func, void *ct
 
         fileid = *md_root_getid(type);
 
-        ret = hiter(&fileid, match, func, ctx);
+        volid_t volid = {fileid.volid, 0};
+        ret = hiter(&volid, &fileid, match, func, ctx);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -111,7 +117,8 @@ static int __kv_lock(root_type_t type)
 
         fileid = *md_root_getid(type);
 
-        ret = klock(&fileid, 10, 1);
+        volid_t volid = {fileid.volid, 0};
+        ret = klock(&volid, &fileid, 10, 1);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -127,7 +134,8 @@ static int __kv_unlock(root_type_t type)
 
         fileid = *md_root_getid(type);
 
-        ret = kunlock(&fileid);
+        volid_t volid = {fileid.volid, 0};
+        ret = kunlock(&volid, &fileid);
         if (ret)
                 GOTO(err_ret, ret);
 

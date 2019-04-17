@@ -102,14 +102,21 @@ err_ret:
         return ret;
 }
 
-int network_connect_master()
+int network_connect_mond(int force)
 {
         int ret;
         nid_t nid;
 
         ANALYSIS_BEGIN(0);
-        if (net_islocal(net_getadmin()) || netable_connected(net_getadmin())) {
+
+        (void) force;
+        
+        if (net_islocal(net_getadmin())) {
                 DBUG("skiped\n");
+                return 0;
+        }
+
+        if (netable_connected(net_getadmin()) && force == 0) {
                 return 0;
         }
 
@@ -117,12 +124,20 @@ int network_connect_master()
         if (unlikely(ret))
                 GOTO(err_ret, ret);
 
+        if (net_islocal(&nid)) {
+                return 0;
+        }
+        
         DBUG("get nid %d\n", nid.id);
         
         ret = __network_connect(&nid);
         if (unlikely(ret))
                 GOTO(err_ret, ret);
 
+        ret = mond_rpc_null(&nid);
+        if (unlikely(ret))
+                GOTO(err_ret, ret);
+        
         DBUG("set admin %u\n", nid.id);
         net_setadmin(&nid);
         
@@ -149,10 +164,6 @@ static int __network_connect_exec(const nid_t *nid, int force)
         char buf[MAX_BUF_LEN];
         ynet_net_info_t *info;
 
-#if !ENABLE_LOCAL_RPC
-        YASSERT(!net_islocal(nid));
-#endif
-
         ANALYSIS_BEGIN(0);
 
         DBUG("connect to %s\n", netable_rname_nid(nid));
@@ -168,7 +179,7 @@ retry:
                 DINFO("connect to master %s, local %s\n",
                       network_rname(net_getadmin()),
                       network_rname(net_getnid()));
-                ret = network_connect_master();
+                ret = network_connect_mond(0);
                 if (unlikely(ret))
                         GOTO(err_ret, ret);
         }
@@ -242,10 +253,6 @@ static int __network_connect_wait_thread(const nid_t *nid, int force, int timeou
         pthread_t th;
         pthread_attr_t ta;
         conn_arg_t *arg;
-
-#if !ENABLE_LOCAL_RPC
-        YASSERT(!net_islocal(nid));
-#endif
 
         ANALYSIS_BEGIN(0);
         
@@ -327,16 +334,12 @@ static int __network_connect_wait(const nid_t *nid, int timeout, int force)
 {
         int ret;
 
-#if !ENABLE_LOCAL_RPC
-        YASSERT(net_islocal(nid) == 0);
-#endif
-
         if (!netable_connectable(nid, force)) {
                 ret = EAGAIN;
                 GOTO(err_ret, ret);
         }
 
-        DBUG("try to connect %s \n", netable_rname_nid(nid));
+        DINFO("try to connect %s \n", netable_rname_nid(nid));
 
         netable_update_retry(nid);
 

@@ -26,11 +26,13 @@ typedef struct {
         sy_spinlock_t lock;
         struct list_head list;
 #endif
-        sy_rwlock_t rwlock;
+        pthread_rwlock_t rwlock;
+        char key[MAX_PATH_LEN];
         redis_ctx_t *ctx;
 } redis_conn_t;
 
 int connect_redis(const char *ip, short port, redis_ctx_t **ctx);
+int redis_error(const char *func, redisReply *reply);
 int connect_redis_unix(const char *path, redis_ctx_t **ctx);
 int disconnect_redis(redis_ctx_t **ctx);
 
@@ -43,13 +45,14 @@ int redis_hset(redis_conn_t *conn, const char *hash, const char *key,
 int redis_hdel(redis_conn_t *conn, const char *hash, const char *key);
 int redis_hiterator(redis_conn_t *conn, const char *hash, const char *match, func2_t func2, void *arg);
 int redis_keys(redis_conn_t *conn, func1_t func1, void *arg);
-int redis_connect(redis_conn_t **_conn, const char *addr, const int *port);
+int redis_connect(redis_conn_t **_conn, const char *addr, const int *port, const char *key);
 int redis_sset(redis_conn_t *conn, const char *set, const char *key);
 int redis_sdel(redis_conn_t *conn, const char *set, const char *key);
 int redis_scount(redis_conn_t *conn, const char *set, uint64_t *count);
 int redis_siterator(redis_conn_t *conn, const char *set, func1_t func, void *arg);
 int redis_hlen(redis_conn_t *conn, const char *key, uint64_t *count);
 int redis_iterator(redis_conn_t *conn, const char *match, func1_t func, void *arg);
+int redis_util_info(const char *addr, int port, const char *key, char *value);
 
 #if 0
 int redis_exec(redis_conn_t *conn, const char *buf);

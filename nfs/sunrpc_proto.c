@@ -14,12 +14,16 @@
 #include "../net/net_events.h"
 #include "../../ynet/sock/sock_tcp.h"
 #include "ynet_rpc.h"
-#include "dbg.h"
 #include "xdr.h"
-#include "nfs_job_context.h"
+#include "core.h"
+#include "corenet.h"
+#include "nfs_args.h"
 #include "nfs_events.h"
-#include "nfs_state_machine.h"
+#include "nfs_conf.h"
+#include "nfs3.h"
+#include "mem_hugepage.h"
 #include "xdr_nfs.h"
+#include "dbg.h"
 
 const char job_sunrpc_request[] = "sunrpc_request";
 
@@ -27,8 +31,6 @@ extern event_job_t sunrpc_nfs3_handler;
 extern event_job_t sunrpc_mount_handler;
 extern event_job_t sunrpc_acl_handler;
 extern event_job_t sunrpc_nlm_handler;
-
-jobtracker_t *sunrpc_jobtracker;
 
 #define NFS3_WRITE 7
 
@@ -146,262 +148,6 @@ static inline int __auth_unix(auth_unix_t *auth_unix, char *buf, int buflen)
         return 0;
 }
 
-
-#if 0
-{
-        int ret;
-        rpc_request_t *rpc_request;
-        const msgid_t *msgid;
-        net_prog_t *prog;
-        net_request_handler handler;
-
-#ifdef HAVE_STATIC_ASSERT
-        static_assert(sizeof(*rpc_request)  < sizeof(mem_cache128_t), "rpc_request_t");
-#endif
-
-        rpc_request = mem_cache_calloc(MEM_CACHE_128, 0);
-        if (!rpc_request) {
-                ret = ENOMEM;
-                GOTO(err_ret, ret);
-        }
-
-        rpc_request->sockid = *sockid;
-        rpc_request->msgid = *msgid;
-        rpc_request->nid.id = 0;
-
-        mbuffer_init(&rpc_request->buf, 0);
-        mbuffer_merge(&rpc_request->buf, buf);
-
-        schedule_task_new("sunrpc", handler, rpc_request, 0);
-
-        return 0;
-err_ret:
-        return ret;
-}
-#endif
-
-int __sunrpc_exec(rpcreq_t *rpcreq)
-{
-        int ret;
-        sunrpc_request_t *req;
-        buffer_t *buf;
-        job_t *job;
-        auth_head_t cred, veri;
-        auth_unix_t auth_unix;
-        char credbuf[MAX_AUTH_BYTES];
-        char veribuf[MAX_AUTH_BYTES];
-        uint32_t is_last;
-        //net_handle_t *nh;
-
-        buf = &rpcreq->buf;
-
-        ret = job_create(&job, sunrpc_jobtracker, job_sunrpc_request);
-        if (unlikely(ret))
-                GOTO(err_ret, ret); //GOTO???
-
-        req = (void *)job->buf;
-
-        ret = mbuffer_popmsg(buf, req, sizeof(sunrpc_request_t));
-        if (unlikely(ret))
-                GOTO(err_ret, ret); //GOTO???
-
-        is_last = ntohl(req->length) & (1 << 31);
-
-        if (is_last)
-                req->length = ntohl(req->length) ^ (1 << 31);
-        else
-                req->length = ntohl(req->length);
-
-        req->xid = req->xid;
-        req->msgtype = ntohl(req->msgtype);
-        req->rpcversion = ntohl(req->rpcversion);
-        req->program = ntohl(req->program);
-        req->progversion = ntohl(req->progversion);
-        req->procedure = ntohl(req->procedure);
-
-        if (unlikely(is_last != (uint32_t)(1 << 31))) {
-                DERROR("%u:%u\n", is_last, (uint32_t)(1 << 31));
-
-                DERROR("rpc request len %u xid %u version %u prog %u version"
-                                " %u procedure %u\n", req->length, req->xid,
-                                req->rpcversion, req->program, req->progversion,
-                                req->procedure);
-
-                UNIMPLEMENTED(__DUMP__);
-        }
-
-        DBUG("rpc request len %u xid %u version %u prog %u version"
-                        " %u procedure %u\n", req->length, req->xid,
-                        req->rpcversion, req->program, req->progversion,
-                        req->procedure);
-
-        mbuffer_get(buf, &cred, sizeof(auth_head_t));
-        cred.flavor = ntohl(cred.flavor);
-        cred.length = ntohl(cred.length);
-
-        ret = mbuffer_popmsg(buf, credbuf, cred.length + sizeof(auth_head_t));
-        if (unlikely(ret))
-                GOTO(err_ret, ret); //GOTO???
-
-        if (cred.length) {
-                ret = __auth_unix(&auth_unix, credbuf+sizeof(auth_head_t), cred.length);
-                if (unlikely(ret))
-                        GOTO(err_ret, ret); //GOTO???
-
-                job->uid = auth_unix.uid;
-                job->gid = auth_unix.gid;
-                yfree((void**)&auth_unix.machinename);
-        }
-
-        mbuffer_get(buf, &veri, sizeof(auth_head_t));
-        veri.flavor = ntohl(veri.flavor);
-        veri.length = ntohl(veri.length);
-
-        DBUG("cred %u len %u veri %u len %u\n", cred.flavor, cred.length,
-                        veri.flavor, veri.length);
-
-        ret = mbuffer_popmsg(buf, veribuf, veri.length + sizeof(auth_head_t));
-        if (unlikely(ret))
-                GOTO(err_ret, ret); //GOTO???
-
-        mbuffer_init(&job->request, 0);
-
-        mbuffer_merge(&job->request, buf);
-
-        DBUG("request len %u\n", job->request.len);
-
-        memset(&job->net, 0x0, sizeof(job->net));
-        job->sock = rpcreq->sockid;
-
-        job->msgid.idx = req->xid;
-        job->msgid.tabid = 0;
-
-        sunrpc_request_handler(job, NULL, NULL);
-
-        return 0;
-err_ret:
-        return ret;
-}
-
-int __sunrpc_needwait(int *used, int *total)
-{
-        int ret, qos;
-
-        ret = job_used(used, total);
-        if (unlikely(ret))
-                YASSERT(0);
-
-        qos = nfsconf.job_qos;
-        if (unlikely(nfsconf.job_qos > gloconf.jobdock_size/4)) {
-                qos = gloconf.jobdock_size/4;
-                DBUG("job_qos need under 1/4 * job_dock_size, qos was set to %d\n", qos);
-        }
-
-        if (*used > qos) {
-                return 1;
-        }
-
-        return 0;
-}
-
-static int __sunrpc_count()
-{
-        int count;
-
-        sy_spin_lock(&rpcreq_queue->lock);
-        count = rpcreq_queue->rpcreq_count;
-        sy_spin_unlock(&rpcreq_queue->lock);
-
-        return count;
-}
-
-void *__sunrpc_worker(void *arg)
-{
-        int ret, used, total, count;
-        rpcreq_t *rpcreq;
-        struct list_head rpcreq_list;
-        struct list_head *pos, *n;
-
-        (void)arg;
-        INIT_LIST_HEAD(&rpcreq_list);
-
-        while (1) {
-                ret = _sem_wait(&rpcreq_queue->sem);
-                if (ret)
-                        UNIMPLEMENTED(__DUMP__);
-
-                sy_spin_lock(&rpcreq_queue->lock);
-                if (list_empty(&rpcreq_queue->rpcreq_list)) {
-                        sy_spin_unlock(&rpcreq_queue->lock);
-                        DBUG("queue empty wait\n");
-                        /*usleep(100000);*/
-                        continue;
-                }
-
-                count = rpcreq_queue->rpcreq_count;
-                list_splice_tail_init(&rpcreq_queue->rpcreq_list, &rpcreq_list);
-                rpcreq_queue->rpcreq_count = 0;
-
-                sy_spin_unlock(&rpcreq_queue->lock);
-
-                list_for_each_safe(pos, n, &rpcreq_list) {
-retry:
-                        if (__sunrpc_needwait(&used, &total)) {
-                                DWARN("job busy queue %d job %d/%d\n",
-                                                count + __sunrpc_count(), used, total);
-                                usleep(1000);
-                                goto retry;
-                        }
-
-                        rpcreq = (rpcreq_t *)pos;
-                        list_del(pos);
-                        ret = __sunrpc_exec(rpcreq);
-                        if (ret)
-                                YASSERT(0);
-                        yfree((void **)&rpcreq);
-                }
-        }
-}
-
-void __sunrpc_add(rpcreq_t *rpcreq)
-{
-                sy_spin_lock(&rpcreq_queue->lock);
-
-                list_add(&rpcreq->hook, &rpcreq_queue->rpcreq_list);
-                rpcreq_queue->rpcreq_count++;
-
-                sy_spin_unlock(&rpcreq_queue->lock);
-                sem_post(&rpcreq_queue->sem);
-}
-
-int sunrpc_init()
-{
-        int ret;
-        pthread_attr_t ta;
-        pthread_t th;
-
-        INIT_LIST_HEAD(&rpcreq_queue->rpcreq_list);
-        rpcreq_queue->rpcreq_count = 0;
-        sy_spin_init(&rpcreq_queue->lock);
-
-        ret = sem_init(&rpcreq_queue->sem, 0, 0);
-        if (ret)
-                GOTO(err_ret, ret);
-
-        pthread_attr_init(&ta);
-        pthread_attr_setdetachstate(&ta, PTHREAD_CREATE_DETACHED);
-
-        ret = pthread_create(&th, &ta, __sunrpc_worker, NULL);
-        if (ret)
-                GOTO(err_ret, ret);
-
-        return 0;
-err_ret:
-        return ret;
-}
-
-
-
 static int __sunrpc_pack_handler(const nid_t *nid, const sockid_t *sockid, buffer_t *buf)
 {
         sunrpc_proto_t type;
@@ -419,20 +165,7 @@ static int __sunrpc_pack_handler(const nid_t *nid, const sockid_t *sockid, buffe
 
         switch (type.msgtype) {
         case SUNRPC_REQ_MSG:
-#if 1
                 __sunrpc_request_handler(sockid, buf);
-#else
-                //在__sunrpc_exec中释放
-                ret = ymalloc((void **)&rpcreq, sizeof(rpcreq_t ));
-                if (ret)
-                        YASSERT(0);
-
-                mbuffer_init(&rpcreq->buf, 0);
-                mbuffer_merge(&rpcreq->buf, buf);
-                rpcreq->sockid = *sockid;
-                INIT_LIST_HEAD(&rpcreq->hook);
-                __sunrpc_add(rpcreq);
-#endif
 
                 break;
         case SUNRPC_REP_MSG:
@@ -449,87 +182,170 @@ static int __sunrpc_pack_handler(const nid_t *nid, const sockid_t *sockid, buffe
         return 0;
 }
 
-int sunrpc_request_handler(job_t *job, void *sock, void *context)
+#if ENABLE_CO_WORKER
+
+typedef struct {
+        sockid_t sockid;
+        int running;
+        char host[MAX_NAME_LEN];
+} sunrpc_ctx_t;
+
+static void __sunrpc_close(void *_ctx)
 {
-        int ret;
-        sunrpc_request_t *req;
+        sunrpc_ctx_t *ctx = _ctx;
 
-        (void) sock;
-        (void) context;
+        DINFO("sunrpc close host %s\n", ctx->host);
+        
+        ctx->running = 0;
+}
 
-        req = (void *)job->buf;
+static int __sunrpc_recv(void *_ctx, void *buf, int *_count)
+{
+        int msg_len, io_len, count = 0;
+        char tmp[MAX_BUF_LEN];
+        buffer_t _buf, *mbuf = buf;
+        sunrpc_ctx_t *ctx = _ctx;
 
-        DBUG("program %u version %u\n", req->program, req->progversion);
+        DBUG("recv %u\n", mbuf->len);
 
-        if (req->program == MOUNTPROG && (req->progversion == MOUNTVERS3 ||
-                                          req->progversion == MOUNTVERS1)) {
-                ret = sunrpc_mount_handler(job);
-                if (ret)
-                        GOTO(err_ret, ret); //GOTO???
-        } else if (req->program == NFS3_PROGRAM && req->progversion == NFS_V3) {
-                ret = sunrpc_nfs3_handler(job);
-                if (ret)
-                        GOTO(err_ret, ret); //GOTO???
-        } else if (req->program == ACL_PROGRAM) {
-                ret = sunrpc_acl_handler(job);
-                if (ret)
-                        GOTO(err_ret, ret); //GOTO???
-       
-        } else if (req->program == NLM_PROGRAM) {
-                DINFO("NLM REQUEST\n");
-                ret = sunrpc_nlm_handler(job);
-                if (ret)
-                        GOTO(err_ret, ret); //GOTO???
-        }else{
-                DERROR("we got wrong prog %u v%u, halt\n", req->program,
-                       req->progversion);  //XXX: handle this --gray
+        while (mbuf->len >= sizeof(sunrpc_request_t)) {
+                mbuffer_get(buf, tmp, sizeof(sunrpc_request_t));
+                sunrpc_pack_len(tmp, sizeof(sunrpc_request_t), &msg_len, &io_len);
+
+                DBUG("msg len %u\n", msg_len + io_len);
+ 
+                if (msg_len + io_len > (int)mbuf->len) {
+                        DBUG("wait %u %u\n", msg_len + io_len, mbuf->len);
+                        break;
+                }
+
+                mbuffer_init(&_buf, 0);
+                mbuffer_pop(buf, &_buf, msg_len + io_len);
+
+                __sunrpc_pack_handler(NULL, &ctx->sockid, &_buf);
+                count++;
         }
 
+        *_count = count;
+
         return 0;
-err_ret:
-        return ret;
 }
 
-int sunrpc_accept_handler(void *_sock, void *context)
+void __sunrpc_check__(void *arg1, void *arg2)
 {
         int ret;
-        net_proto_t proto;
-        net_handle_t nh;
-        ynet_sock_conn_t *sock = _sock;
-        int fd = sock->nh.u.sd.sd;
+        sunrpc_ctx_t *ctx = arg1;
+        core_t *core = core_self();
         
-        (void) context;
+        (void) arg2;
 
-        DBUG("new conn for sd %d\n", fd);
+        DINFO("sunrpc client %s, running %s, polling %s socket %d\n",
+              ctx->host,
+              ctx->running ? "on" : "off",
+              core->flag & CORE_FLAG_POLLING ? "on" : "off",
+              ctx->sockid.sd);
 
-        _memset(&proto, 0x0, sizeof(net_proto_t));
+        mem_hugepage_private_dump();
+        
+        if (ctx->running)
+                return;
 
-        proto.head_len = sizeof(sunrpc_request_t);
-        proto.reader = net_events_handle_read;
-        proto.writer = net_events_handle_write;
-        proto.pack_len = sunrpc_pack_len;
-        proto.pack_handler = __sunrpc_pack_handler;
-        //proto.prog[0].handler = sunrpc_request_handler;
-        proto.jobtracker = sunrpc_jobtracker;
+        ret = core_worker_exit(core);
+        if (ret) {
+                DWARN("sunrpc client %s, exit fail, wait next\n",
+                      ctx->host);
+                return;
+        }
+        
+        DINFO("sunrpc host %s, exit\n", ctx->host);
+        yfree((void**)&ctx);
+        pthread_exit(NULL);
+}
 
-        ret = sdevent_accept(fd, &nh, &proto, YNET_RPC_NONBLOCK);
-        if (ret)
-                GOTO(err_ret, ret);
+static int __sunrpc_check(va_list ap)
+{
+        sunrpc_ctx_t *ctx = va_arg(ap, sunrpc_ctx_t *);
+        core_t *core = core_self();
 
-#if 0
-        ret = sdevents_align(&nh, 4);
-        if (ret)
-                GOTO(err_ret, ret);
-#endif
+        va_end(ap);
 
-        ret = sdevent_add(&nh, NULL, Y_EPOLL_EVENTS, NULL, NULL);
-        if (ret)
-                GOTO(err_ret, ret);
+        core_check_register(core, "sunrpc_check", ctx, __sunrpc_check__);
 
         return 0;
+}
+
+int sunrpc_accept(int srv_sd)
+{
+        int ret, sd;
+        struct sockaddr_in sin;
+        socklen_t alen;
+        sunrpc_ctx_t *ctx;
+        core_t *core;
+
+        _memset(&sin, 0, sizeof(sin));
+        alen = sizeof(struct sockaddr_in);
+
+        sd = accept(srv_sd, &sin, &alen);
+        if (sd < 0 ) {
+                ret = errno; 
+                GOTO(err_ret, ret);
+        }
+
+        ret = tcp_sock_tuning(sd, 1, YNET_RPC_NONBLOCK);
+        if (ret)
+                GOTO(err_sd, ret);
+
+        int flag = CORE_FLAG_ACTIVE | CORE_FLAG_PRIVATE;
+        //int flag = CORE_FLAG_ACTIVE;
+
+#if ENABLE_REDIS_CO
+        flag |= CORE_FLAG_REDIS;
+#endif
+
+        if (gloconf.polling_timeout == 0) {
+                flag |= CORE_FLAG_POLLING;
+        }
+
+        ret = core_create(&core, "sunrpc", sd, flag);
+        if (ret)
+                GOTO(err_sd, ret);
+
+        ret = _sem_wait(&core->sem);
+        if (unlikely(ret))
+                GOTO(err_sd, ret);
+        
+        ret = ymalloc((void**)&ctx, sizeof(*ctx));
+        if (ret)
+                GOTO(err_sd, ret);
+        
+        ctx->sockid.sd = sd;
+        ctx->sockid.type = SOCKID_CORENET;
+        ctx->sockid.seq = _random();
+        ctx->sockid.addr = sin.sin_addr.s_addr;
+        ctx->running = 1;
+        strcpy(ctx->host, _inet_ntoa(ctx->sockid.addr));
+       
+        corenet_tcp_t *corenet;
+        corenet = core->tcp_net;
+        ret = corenet_tcp_add(corenet, &ctx->sockid, ctx, __sunrpc_recv,
+                              __sunrpc_close, NULL, NULL, "sunrpc");
+        if (unlikely(ret))
+                UNIMPLEMENTED(__DUMP__);
+
+        schedule_post(core->schedule);
+
+        ret = core_request_new(core, -1, "sunrpc_check", __sunrpc_check, ctx);
+        if (unlikely(ret))
+                GOTO(err_sd, ret);
+        
+        return 0;
+err_sd:
+        close(sd);
 err_ret:
         return ret;
 }
+
+#else
 
 int sunrpc_accept(int srv_sd)
 {
@@ -558,11 +374,10 @@ int sunrpc_accept(int srv_sd)
         proto.writer = net_events_handle_write;
         proto.pack_len = sunrpc_pack_len;
         proto.pack_handler = __sunrpc_pack_handler;
-        //proto.prog[0].handler = sunrpc_request_handler;
-        proto.jobtracker = sunrpc_jobtracker;
 
         nh.type = NET_HANDLE_TRANSIENT;
         nh.u.sd.sd = sd;
+        nh.u.sd.addr = sin.sin_addr.s_addr;
 
         ret = sdevent_open(&nh, &proto);
         if (ret)
@@ -578,13 +393,14 @@ err_sd:
 err_ret:
         return ret;
 }
+#endif
 
 static int __sunrpc_request_handler(const sockid_t *sockid,
                                     buffer_t *buf)
 {
         int ret;
-        uid_t uid;
-        gid_t gid;
+        uid_t uid = 0;
+        gid_t gid = 0;
         sunrpc_request_t req;
         auth_head_t cred, veri;
         auth_unix_t auth_unix;

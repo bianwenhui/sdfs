@@ -29,6 +29,14 @@ typedef enum {
 
 #define RET_MAGIC 0x866aa9f0
 
+int __sy_spin_lock(pthread_spinlock_t *lock, const char *name)
+{
+        if (schedule_running()) {
+                DINFO("lock %s\n", name);
+        }
+        return pthread_spin_lock(lock);
+}
+
 typedef struct {
         struct list_head hook;
         char lock_type;
@@ -59,6 +67,7 @@ int sy_rwlock_init(sy_rwlock_t *rwlock, const char *name)
 #if LOCK_DEBUG
         rwlock->last_unlock = 0;
         rwlock->count = 0;
+#endif
         
         if (name) {
                 if (strlen(name) > MAX_LOCK_NAME - 1)
@@ -68,7 +77,6 @@ int sy_rwlock_init(sy_rwlock_t *rwlock, const char *name)
         } else {
                 rwlock->name[0] = '\0';
         }
-#endif
 
         return 0;
 err_ret:
@@ -140,6 +148,24 @@ STATIC int __sy_rwlock_trylock__(sy_rwlock_t *rwlock, char type, task_t *task)
 
         //YASSERT((int)rwlock->lock.__data.__readers >= 0);
         
+        return ret;
+}
+
+STATIC int __sy_rwlock_trylock0(sy_rwlock_t *rwlock, char type)
+{
+        int ret;
+
+        if (list_empty(&rwlock->queue)) {
+                ret =  __sy_rwlock_trylock__(rwlock, type, NULL);
+                if (unlikely(ret))
+                        goto err_ret;
+        } else {
+                ret = EBUSY;
+                GOTO(err_ret, ret);
+        }
+
+        return 0;
+err_ret:
         return ret;
 }
 
@@ -244,7 +270,7 @@ STATIC int __sy_rwlock_lock(sy_rwlock_t *rwlock, char type, int tmo)
 {
         int ret, retry = 0;
         lock_wait_t lock_wait;
-        char *name = type == 'r' ? "rdlock" : "rwlock";
+        //char *name = type == 'r' ? "rdlock" : "rwlock";
 
         if (ng.daemon) {
                 YASSERT(schedule_status() != SCHEDULE_STATUS_IDLE);
@@ -252,6 +278,11 @@ STATIC int __sy_rwlock_lock(sy_rwlock_t *rwlock, char type, int tmo)
         
         ANALYSIS_BEGIN(0);
 
+        ret = __sy_rwlock_trylock0(rwlock, type);
+        if (likely(ret == 0)) {
+                goto success;
+        }
+        
 retry:
         ret = sy_spin_lock(&rwlock->spin);
         if (unlikely(ret))
@@ -299,12 +330,14 @@ retry:
 #if LOCK_DEBUG
                 YASSERT(rwlock->count >= 0);
                 rwlock->count++;
-                DINFO("locked %p %c count %d, writer %d\n", rwlock, type, rwlock->count, rwlock->lock.__data.__cur_writer);
+                DINFO("locked %p %c count %d, writer %d\n", rwlock, type,
+                      rwlock->count, rwlock->lock.__data.__cur_writer);
 #endif
                 sy_spin_unlock(&rwlock->spin);
         }
 
-        ANALYSIS_END(0, 1000 * 50, name);
+success:
+        ANALYSIS_END(0, 1000 * 50, rwlock->name);
 
         return 0;
 err_lock:

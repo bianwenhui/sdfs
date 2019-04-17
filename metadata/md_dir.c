@@ -4,7 +4,6 @@
 
 #define DBG_SUBSYS S_YFSMDC
 
-#include "align.h"
 #include "net_global.h"
 #include "job_dock.h"
 #include "ynet_rpc.h"
@@ -18,13 +17,14 @@
 #include "quota.h"
 #include "schedule.h"
 #include "redis_conn.h"
+#include "attr_queue.h"
 #include "sdfs_quota.h"
 #include "dbg.h"
 
 static dirop_t *dirop = &__dirop__;
 static inodeop_t *inodeop = &__inodeop__;
 
-inline static int __md_update_time(const fileid_t *fileid, int at, int mt, int ct)
+inline static int __md_update_time(const volid_t *volid, const fileid_t *fileid, int at, int mt, int ct)
 {
         int ret;
         setattr_t setattr;
@@ -35,21 +35,29 @@ inline static int __md_update_time(const fileid_t *fileid, int at, int mt, int c
                             mt ? __SET_TO_SERVER_TIME : __DONT_CHANGE, NULL,
                             ct ? __SET_TO_SERVER_TIME : __DONT_CHANGE, NULL);
 
-        ret = inodeop->setattr(fileid, &setattr, 0);
+#if ENABLE_ATTR_QUEUE
+        ret = attr_queue_settime(volid, fileid, &setattr);
         if (ret)
                 GOTO(err_ret, ret);
+#else
+        ret = inodeop->setattr(volid, fileid, &setattr, 0);
+        if (ret)
+                GOTO(err_ret, ret);
+#endif
 
         return 0;
 err_ret:
         return ret;
 }
 
-static int __md_create(const fileid_t *parent, const char *name,
+static int __md_create(const volid_t *volid, const fileid_t *parent, const char *name,
                        const setattr_t *setattr, int mode, fileid_t *_fileid)
 {
         int ret;
         fileid_t fileid;
 
+        DBUG("create %s @ "CHKID_FORMAT"\n", name, CHKID_ARG(parent));
+        
         if (strncmp(name, SDFS_MD_SYSTEM, strlen(SDFS_MD_SYSTEM)) == 0) {
                 ret = EPERM;
                 GOTO(err_ret, ret);
@@ -61,20 +69,20 @@ static int __md_create(const fileid_t *parent, const char *name,
                 GOTO(err_ret, ret);
 #endif
 
-        ret = inodeop->create(parent, setattr, mode, &fileid);
+        ret = inodeop->create(volid, parent, setattr, mode, &fileid);
         if (ret)
                 GOTO(err_dec, ret);
 
 #if ENABLE_MD_POSIX
-        ret = __md_update_time(parent, 0, 1, 1);
+        ret = __md_update_time(volid, parent, 0, 1, 1);
         if (ret)
                 GOTO(err_dec, ret);
 #endif
 
-        ret = dirop->newrec(parent, name, &fileid, mode, O_EXCL);
+        ret = dirop->newrec(volid, parent, name, &fileid, mode, O_EXCL);
         if (ret) {
                 if (ret == EEXIST) {
-                        inodeop->unlink(&fileid, NULL);
+                        inodeop->unlink(volid, &fileid, NULL);
                 }
 
                 GOTO(err_dec, ret);
@@ -93,13 +101,14 @@ err_ret:
         return ret;
 }
 
-int md_create(const fileid_t *parent, const char *name, const setattr_t *setattr, fileid_t *fileid)
+int md_create(const volid_t *volid, const fileid_t *parent, const char *name,
+              const setattr_t *setattr, fileid_t *fileid)
 {
         int ret;
 
         ANALYSIS_BEGIN(0);
         
-        ret = __md_create(parent, name, setattr, ftype_file, fileid);
+        ret = __md_create(volid, parent, name, setattr, ftype_file, fileid);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -110,13 +119,14 @@ err_ret:
         return ret;
 }
 
-int md_mkdir(const fileid_t *parent, const char *name, const setattr_t *setattr, fileid_t *fileid)
+int md_mkdir(const volid_t *volid, const fileid_t *parent, const char *name,
+             const setattr_t *setattr, fileid_t *fileid)
 {
         int ret;
 
         ANALYSIS_BEGIN(0);
         
-        ret = __md_create(parent, name, setattr, ftype_dir, fileid);
+        ret = __md_create(volid, parent, name, setattr, ftype_dir, fileid);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -127,14 +137,15 @@ err_ret:
         return ret;
 }
 
-int md_readdir(const fileid_t *fileid, off_t offset, void **de, int *delen)
+int md_readdir(const volid_t *volid, const fileid_t *fileid, off_t offset,
+               void **de, int *delen)
 {
         int ret, len;
         char buf[MAX_BUF_LEN];
         void *ptr;
 
         len = MAX_BUF_LEN;
-        ret = dirop->readdir(fileid, buf, &len, offset);
+        ret = dirop->readdir(volid, fileid, buf, &len, offset);
         if (ret) {
                 GOTO(err_ret, ret);
         }
@@ -157,7 +168,7 @@ err_ret:
         return ret;
 }
 
-static int __md_redirplus(void *buf, int buflen)
+static int __md_redirplus(const volid_t *volid, void *buf, int buflen)
 {
         int ret;
         struct dirent *de;
@@ -182,7 +193,7 @@ static int __md_redirplus(void *buf, int buflen)
                 pos = (void *)de + de->d_reclen - sizeof(md_proto_t);
                 YASSERT(de->d_reclen < MAX_NAME_LEN * 2 + sizeof(md_proto_t));
                 
-                ret = md_getattr(md, &pos->fileid);
+                ret = inodeop->getattr(volid, &pos->fileid, md);
                 if (ret) {
                         DWARN("load file "CHKID_FORMAT " not found \n",
                               CHKID_ARG(&pos->fileid));
@@ -190,15 +201,16 @@ static int __md_redirplus(void *buf, int buflen)
                         continue;
                 }
 
-                DBUG("load file "CHKID_FORMAT " chknum %u, size %llu \n", CHKID_ARG(&md->fileid),
-                      md->chknum, md->at_size);
+                DBUG("load file "CHKID_FORMAT " chknum %u, size %llu \n",
+                     CHKID_ARG(&md->fileid),
+                     md->chknum, md->at_size);
                 memcpy(pos, md, sizeof(*md));
         }
 
         return 0;
 }
 
-int md_readdirplus(const fileid_t *fileid, off_t offset,
+int md_readdirplus(const volid_t *volid, const fileid_t *fileid, off_t offset,
                     void **de, int *delen)
 {
         int ret, len;
@@ -206,13 +218,13 @@ int md_readdirplus(const fileid_t *fileid, off_t offset,
         void *ptr;
 
         len = MAX_BUF_LEN * 4;
-        ret = dirop->readdirplus(fileid, buf, &len, offset);
+        ret = dirop->readdirplus(volid, fileid, buf, &len, offset);
         if (ret) {
                 GOTO(err_ret, ret);
         }
 
         if (len) {
-                ret = __md_redirplus(buf, len);
+                ret = __md_redirplus(volid, buf, len);
                 if (ret)
                         GOTO(err_ret, ret);
                 
@@ -233,7 +245,7 @@ err_ret:
         return ret;
 }
 
-int md_readdirplus_with_filter(const fileid_t *fileid, off_t offset,
+int md_readdirplus_with_filter(const volid_t *volid, const fileid_t *fileid, off_t offset,
                                void **de, int *delen, const filter_t *filter)
 {
         int ret, len;
@@ -241,13 +253,13 @@ int md_readdirplus_with_filter(const fileid_t *fileid, off_t offset,
         void *ptr;
 
         len = MAX_BUF_LEN * 4;
-        ret = dirop->readdirplus_filter(fileid, buf, &len, offset, filter);
+        ret = dirop->readdirplus_filter(volid, fileid, buf, &len, offset, filter);
         if (ret) {
                 GOTO(err_ret, ret);
         }
 
         if (len) {
-                ret = __md_redirplus(buf, len);
+                ret = __md_redirplus(volid, buf, len);
                 if (ret)
                         GOTO(err_ret, ret);
                 
@@ -268,23 +280,16 @@ err_ret:
         return ret;
 }
 
-int md_readdirplus_count(const fileid_t *fileid, file_statis_t *file_statis)
-{
-        (void) fileid;
-        (void) file_statis;
-
-        UNIMPLEMENTED(__DUMP__);
-
-        return 0;
-}
-
-int md_lookup(fileid_t *fileid, const fileid_t *parent, const char *name)
+int md_lookup(const volid_t *volid, fileid_t *fileid, const fileid_t *parent,
+              const char *name)
 {
         int ret;
         uint32_t type;
         md_proto_t *md;
         char buf[MAX_BUF_LEN];
 
+        DBUG("lookup %s @ "CHKID_FORMAT"\n", name, CHKID_ARG(parent));
+        
         if (strcmp(name, ".") == 0) {
                 *fileid = *parent;
                 return 0;
@@ -294,14 +299,14 @@ int md_lookup(fileid_t *fileid, const fileid_t *parent, const char *name)
                         return 0;
                 } else {
                         md = (void *)buf;
-                        ret = inodeop->getattr(parent, md);
+                        ret = inodeop->getattr(volid, parent, md);
                         if (ret)
                                 GOTO(err_ret, ret);
                         
                         *fileid = md->parent;
                 }
         } else {
-                ret = dirop->lookup(parent, name, fileid, &type);
+                ret = dirop->lookup(volid, parent, name, fileid, &type);
                 if (ret)
                         GOTO(err_ret, ret);
         }
@@ -311,18 +316,18 @@ err_ret:
         return ret;
 }
 
-int md_rmdir(const fileid_t *parent, const char *name)
+int md_rmdir(const volid_t *volid, const fileid_t *parent, const char *name)
 {
         int ret;
         uint32_t type;
         uint64_t count;
         fileid_t fileid;
 
-        ret = dirop->lookup(parent, name, &fileid, &type);
+        ret = dirop->lookup(volid, parent, name, &fileid, &type);
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = inodeop->childcount(&fileid, &count);
+        ret = inodeop->childcount(volid, &fileid, &count);
         if (ret) {
                 if (ret == ENOENT) {
                         DWARN(CHKID_FORMAT" not found\n",
@@ -339,7 +344,7 @@ int md_rmdir(const fileid_t *parent, const char *name)
                 if (ret)
                         GOTO(err_ret, ret);
 
-                ret = inodeop->unlink(&fileid, NULL);
+                ret = inodeop->unlink(volid, &fileid, NULL);
                 if (ret) {
                         if (ret == ENOENT) {
                                 DWARN(CHKID_FORMAT" not found\n", CHKID_ARG(&fileid));
@@ -350,12 +355,12 @@ int md_rmdir(const fileid_t *parent, const char *name)
         }
 
 #if ENABLE_MD_POSIX
-        ret = __md_update_time(parent, 0, 1, 1);
+        ret = __md_update_time(volid, parent, 0, 1, 1);
         if (ret)
                 GOTO(err_ret, ret);
 #endif
         
-        ret = dirop->unlink(parent, name);
+        ret = dirop->unlink(volid, parent, name);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -364,14 +369,15 @@ err_ret:
         return ret;
 }
 
-int md_unlink(const fileid_t *parent, const char *name, md_proto_t *_md)
+int md_unlink(const volid_t *volid, const fileid_t *parent, const char *name,
+              md_proto_t *_md)
 {
         int ret;
         fileid_t fileid;
         md_proto_t *md;
         char buf[MAX_BUF_LEN];
 
-        ret = md_lookup(&fileid, parent, name);
+        ret = md_lookup(volid, &fileid, parent, name);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -380,7 +386,7 @@ int md_unlink(const fileid_t *parent, const char *name, md_proto_t *_md)
                 GOTO(err_ret, ret);
 
         md = (void *)buf;
-        ret = inodeop->unlink(&fileid, md);
+        ret = inodeop->unlink(volid, &fileid, md);
         if (ret) {
                 if (ret == ENOENT) {
                         DWARN(CHKID_FORMAT" not found\n", CHKID_ARG(&fileid));
@@ -389,18 +395,18 @@ int md_unlink(const fileid_t *parent, const char *name, md_proto_t *_md)
         }
 
 #if ENABLE_MD_POSIX
-        ret = __md_update_time(parent, 0, 1, 1);
+        ret = __md_update_time(volid, parent, 0, 1, 1);
         if (ret)
                 GOTO(err_ret, ret);
 
         if (S_ISREG(md->at_mode) && md->at_nlink) {
-                ret = __md_update_time(&fileid, 0, 0, 1);
+                ret = __md_update_time(volid, &fileid, 0, 0, 1);
                 if (ret)
                         GOTO(err_ret, ret);
         }
 #endif
 
-        ret = dirop->unlink(parent, name);
+        ret = dirop->unlink(volid, parent, name);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -411,26 +417,26 @@ err_ret:
         return ret;
 }
 
-int md_link2node(const fileid_t *fileid, const fileid_t *parent,
+int md_link2node(const volid_t *volid, const fileid_t *fileid, const fileid_t *parent,
                   const char *name)
 {
         int ret;
         
-        ret = inodeop->link(fileid);
+        ret = inodeop->link(volid, fileid);
         if (ret)
                 GOTO(err_ret, ret);
 
 #if ENABLE_MD_POSIX
-        ret = __md_update_time(parent, 0, 1, 1);
+        ret = __md_update_time(volid, parent, 0, 1, 1);
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = __md_update_time(fileid, 0, 0, 1);
+        ret = __md_update_time(volid, fileid, 0, 0, 1);
         if (ret)
                 GOTO(err_ret, ret);
 #endif
         
-        ret = dirop->newrec(parent, name, fileid, __S_IFREG, O_EXCL);
+        ret = dirop->newrec(volid, parent, name, fileid, __S_IFREG, O_EXCL);
         if (ret)
                 GOTO(err_ret, ret);
         
@@ -439,7 +445,8 @@ err_ret:
         return ret;
 }
 
-int md_symlink(const fileid_t *parent, const char *name, const char *link_target,
+int md_symlink(const volid_t *volid, const fileid_t *parent, const char *name,
+               const char *link_target,
                uint32_t mode, uint32_t uid, uint32_t gid)
 {
         int ret;
@@ -447,15 +454,15 @@ int md_symlink(const fileid_t *parent, const char *name, const char *link_target
         setattr_t setattr;
 
         setattr_init(&setattr, mode, -1, NULL, uid, gid, -1);
-        ret = inodeop->create(parent, &setattr, ftype_symlink, &fileid);
+        ret = inodeop->create(volid, parent, &setattr, ftype_symlink, &fileid);
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = inodeop->symlink(&fileid, link_target);
+        ret = inodeop->symlink(volid, &fileid, link_target);
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = dirop->newrec(parent, name, &fileid, __S_IFLNK, O_EXCL);
+        ret = dirop->newrec(volid, parent, name, &fileid, __S_IFLNK, O_EXCL);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -464,8 +471,8 @@ err_ret:
         return ret;
 }
 
-int md_readlink(const fileid_t *fileid, char *_buf)
+int md_readlink(const volid_t *volid, const fileid_t *fileid, char *_buf)
 {
-        return inodeop->readlink(fileid, _buf);
+        return inodeop->readlink(volid, fileid, _buf);
 }
 

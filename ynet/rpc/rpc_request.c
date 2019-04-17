@@ -55,7 +55,7 @@ int rpc_request_prep(buffer_t *buf, const msgid_t *msgid, const void *request,
         net_req->blocks = 0;
         net_req->master_magic = ng.master_magic;
         net_req->priority = (priority == -1) ? schedule_priority(NULL) : priority;
-        net_req->load = jobdock_load();
+        net_req->load = core_latency_get();
         memcpy(net_req->buf, request, reqlen);
 
         
@@ -88,20 +88,19 @@ static int __rpc_request_send(const sockid_t *sockid, const msgid_t *msgid, cons
               _inet_ntoa(sockid->addr), msgid->idx,
               msgid->figerprint, buf.len);
 
-#if 0
-        ret = vm_forward(sockid, &buf, 0);
+#if ENABLE_CORE_PIPELINE
+        ret = core_pipeline_send(sockid, &buf, 0);
         if (unlikely(ret)) {
+                ret = _errno_net(ret);
                 if (ret == ENOSYS) {
-                        // rpc here
                         sock2nh(&nh, sockid);
                         ret = sdevent_queue(&nh, &buf, 0);
                         if (unlikely(ret)) {
                                 ret = _errno_net(ret);
                                 GOTO(err_free, ret);
                         }
-                } else {
+                } else
                         GOTO(err_free, ret);
-                }
         }
 #else
         sock2nh(&nh, sockid);
@@ -276,10 +275,12 @@ STATIC int __rpc_request_wait(const char *name, const net_handle_t *nh, const vo
         const nid_t *nid;
 
         if (nh->type == NET_HANDLE_PERSISTENT) {
+#if 0
                 ret = network_connect(&nh->u.nid, NULL, 1, 0);
                 if (unlikely(ret))
                         GOTO(err_ret, ret);
-
+#endif
+                
                 ret = netable_getsock(&nh->u.nid, &sockid);
                 if (unlikely(ret))
                         GOTO(err_ret, ret);

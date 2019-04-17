@@ -210,58 +210,39 @@ static void _share_args2info(IN const fileid_t *dirid,
         strncpy(shareinfo->path, path, sizeof(shareinfo->path));
 }
 
-static void _print_cifs_share_info(IN const share_cifs_t *share_cifs)
+static void __print_shareinfo(IN const shareinfo_t *shareinfo, const char *protocol)
 {
-        printf("protocol   : cifs\n"
+        printf("protocol   : %s\n"
                "directory  : %s\n"
                "dirid      : "ID_VID_FORMAT"\n"
                "user_name    : %s\n"
                "group_name    : %s\n"
                "host_name    : %s\n"
-               "share_name : %s\n"
-               "mode       : %s\n",
-               share_cifs->path,
-               ID_VID_ARG(&share_cifs->dirid),
-               (char *)share_cifs->uname,
-               (char *)share_cifs->gname,
-               (char *)share_cifs->hname,
-               share_cifs->share_name,
-               share_modstr[share_cifs->mode]);
+               "mode       : %s\n"
+               "share_name : %s\n",
+               protocol,
+               shareinfo->path,
+               ID_VID_ARG(&shareinfo->dirid),
+               (char *)shareinfo->uname,
+               (char *)shareinfo->gname,
+               (char *)shareinfo->hname,
+               share_modstr[shareinfo->mode],
+               shareinfo->share_name);
+}
+
+static void _print_cifs_share_info(IN const share_cifs_t *share_cifs)
+{
+        __print_shareinfo(share_cifs, "cifs");
 }
 
 static void _print_ftp_share_info(IN const share_ftp_t *share_ftp)
 {
-
-        printf("protocol  : ftp\n"
-               "directory : %s\n"
-               "dirid     : "ID_VID_FORMAT"\n"
-               "user_name   : %s\n"
-               "group_name   : %s\n"
-               "host_name   : %s\n"
-               "mode      : %s\n",
-               share_ftp->path,
-               ID_VID_ARG(&share_ftp->dirid),
-               (char *)share_ftp->uname,
-               (char *)share_ftp->gname,
-               (char *)share_ftp->hname,
-               share_modstr[share_ftp->mode]);
+        __print_shareinfo(share_ftp, "ftp");
 }
 
 static void _print_nfs_share_info(IN const share_nfs_t *share_nfs)
 {
-        printf("protocol  : nfs\n"
-               "directory : %s\n"
-               "dirid     : "ID_VID_FORMAT"\n"
-               "user_name   : %s\n"
-               "group_name   : %s\n"
-               "host_name   : %s\n"
-               "mode      : %s\n",
-               share_nfs->path,
-               ID_VID_ARG(&share_nfs->dirid),
-               (char *)share_nfs->uname,
-               (char *)share_nfs->gname,
-               (char *)share_nfs->hname,
-               share_modstr[share_nfs->mode]);
+        __print_shareinfo(share_nfs, "nfs");
 }
 
 static void _print_share_info(IN share_protocol_t prot, IN const char *buf)
@@ -333,7 +314,11 @@ static int _share_list(share_protocol_t prot)
         if (ret)
                 GOTO(err_ret, ret);
 
-        _list_share_info(prot, shareinfo, count);
+        if (count) {
+                _list_share_info(prot, shareinfo, count);
+
+                yfree((void **)&shareinfo);
+        }
 
         return 0;
 err_ret:
@@ -508,7 +493,7 @@ int main(int argc, char *argv[])
                         GOTO(err_ret, ret);
 
                 md = (void *)buf;
-                ret = md_getattr((void *)md, &dirid);
+                ret = md_getattr(NULL, &dirid, (void *)md);
                 if (ret)
                         GOTO(err_ret, ret);
 
@@ -523,7 +508,7 @@ int main(int argc, char *argv[])
 
         if (SHARE_SET == oper_type) {
                 //oct 777 decimal 511
-                ret = sdfs_chmod(&dirid, 511);
+                ret = sdfs_chmod(NULL, &dirid, 511);
                 if(ret)
                         GOTO(err_ret, ret);
 

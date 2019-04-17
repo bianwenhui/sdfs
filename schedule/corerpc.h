@@ -1,6 +1,7 @@
 #ifndef __CORERPC_H__
 #define __CORERPC_H__
 #include "core.h"
+#include "rpc_table.h"
 
 /**
  * @file CORERPC
@@ -40,9 +41,6 @@ enum corerp_opcode {
         CORERPC_READ,
 };
 
-int corerpc_rdma_recv_msg(void *_ctx, void *iov, int *_count);
-int corerpc_rdma_recv_data(void *_ctx, void *_data_buf, void *_msg_buf);
-
 // rpc table
 void corerpc_register(int type, net_request_handler handler, void *context);
 
@@ -50,8 +48,10 @@ int corerpc_postwait(const char *name, const nid_t *nid, const void *request,
                      int reqlen, const buffer_t *wbuf, buffer_t *rbuf, int msg_type, int msg_size, int timeout);
 
 // sockid-based
-int corerpc_send_and_wait(const char *name, const sockid_t *sockid, const nid_t *nid, const void *request,
-                          int reqlen, const buffer_t *wbuf, buffer_t *rbuf, int msg_type, int msg_size, int timeout);
+int corerpc_send_and_wait(void *ctx, const char *name, const sockid_t *sockid,
+                          const nid_t *nid, const void *request,
+                          int reqlen, const buffer_t *wbuf, buffer_t *rbuf,
+                          int msg_type, int msg_size, int timeout);
 
 void corerpc_reply(const sockid_t *sockid, const msgid_t *msgid, const void *_buf, int len);
 void corerpc_reply1(const sockid_t *sockid, const msgid_t *msgid, buffer_t *_buf);
@@ -59,15 +59,21 @@ void corerpc_reply_error(const sockid_t *sockid, const msgid_t *msgid, int _erro
 
 int corerpc_recv(void *ctx, void *buf, int *count);
 
-void corerpc_scan();
+void corerpc_scan(void *ctx);
 
 // callback
 void corerpc_close(void *ctx);
 void corerpc_reset(const sockid_t *sockid);
+void corerpc_destroy(rpc_table_t **_rpc_table);
 
 
 //rpc table
 int corerpc_init(const char *name, core_t *core);
+#if ENABLE_RDMA
 void corerpc_rdma_reset(const sockid_t *sockid);
+int corerpc_rdma_recv_msg(void *_ctx, void *iov, int *_count);
+int corerpc_rdma_recv_data(void *_ctx, void *_data_buf, void *_msg_buf);
+
+#endif
 
 #endif

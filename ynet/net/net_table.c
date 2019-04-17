@@ -342,7 +342,8 @@ static void __netable_close(void *_arg)
         yfree((void **)&_arg);
 }
 
-static int __netable_connect__(entry_t *ent, const net_handle_t *sock, const ynet_net_info_t *info, int flag)
+static int __netable_connect__(entry_t *ent, const net_handle_t *sock,
+                               const ynet_net_info_t *info, int flag)
 {
         int ret;
         arg_t *arg;
@@ -406,7 +407,8 @@ static int __network_connect2(entry_t *ent, const ynet_net_info_t *info)
 
         if (ent->status == NETABLE_CONN) {
                 DINFO("connect to %s sockid %s/%d time %u, exist\n",
-                      ent->lname, _inet_ntoa(ent->sock.u.sd.addr), ent->sock.u.sd.sd, (int)ent->ltime.now);
+                      ent->lname, _inet_ntoa(ent->sock.u.sd.addr),
+                      ent->sock.u.sd.sd, (int)ent->ltime.now);
                 goto out;
         }
         
@@ -641,10 +643,6 @@ int netable_connect_info(net_handle_t *nh, const ynet_net_info_t *info, int forc
         if (info->deleting) {
                 maping_drop(HOST2NID, info->name);
         }
-
-#if !ENABLE_LOCAL_RPC
-        YASSERT(!net_islocal(&info->id));
-#endif
 
         main_loop_hold();
 
@@ -964,13 +962,6 @@ time_t IO_FUNC netable_conn_time(const nid_t *nid)
 #endif
         
         
-#if !ENABLE_LOCAL_RPC
-        if (net_islocal(nid)) {
-                return LOCAL_LTIME;
-        }
-
-#endif
-
         ent = __netable_nidfind(nid);
         if (unlikely(ent == NULL))
                 return 0;
@@ -1261,7 +1252,7 @@ void netable_sort(nid_t *nids, int count)
                 sec->nid = nids[i];
 
                 if (net_islocal(&sec->nid)) {
-                        sec->load = jobdock_load();
+                        sec->load = core_latency_get();
                 } else {
                         net = __netable_nidfind(&sec->nid);
                         if (net == NULL || net->status != NETABLE_CONN) {
@@ -1271,7 +1262,7 @@ void netable_sort(nid_t *nids, int count)
 
                         DBUG("%s latency %llu\n", netable_rname_nid(&sec->nid), (LLU)net->load);
 
-                        if (net->load < 0.5)
+                        if (net->load < 0.1)
                                 sec->load = 0;
                         else
                                 sec->load = net->load;
@@ -1357,7 +1348,7 @@ void IO_FUNC netable_select(const nid_t *nids, int count, nid_t *nid)
                 sec->nid = nids[i];
 
                 if (net_islocal(&sec->nid)) {
-                        sec->load = jobdock_load();
+                        sec->load = core_latency_get();
                 } else {
                         net = __netable_nidfind(&sec->nid);
                         if (net == NULL || net->status != NETABLE_CONN) {
@@ -1713,63 +1704,7 @@ time_t netable_last_update(const nid_t *nid)
         return ent->update;
 }
 
-//just for compatible, will be removed
-int netable_msgpush(const nid_t *nid, const void *buf, int len)
-{
-        (void) nid;
-        (void) buf;
-        (void) len;
-
-        UNIMPLEMENTED(__WARN__);
-
-        return 0;
-}
-
 void netable_put(net_handle_t *nh, const char *why)
 {
         netable_close(&nh->u.nid, why, NULL);
-}
-
-int netable_send(const net_handle_t *nh, job_t *job, uint64_t hash, int is_request)
-{
-        int ret;
-        net_handle_t socknh;
-
-        (void) hash;
-        (void) is_request;
-        
-        ret = netable_getsock(&nh->u.nid, &socknh.u.sd);
-        if (unlikely(ret))
-                GOTO(err_ret, ret);
-
-        socknh.type = NET_HANDLE_TRANSIENT;
-        ret = sdevent1_queue(&socknh, job);
-        if (ret)
-                GOTO(err_ret, ret);
-
-        return 0;
-err_ret:
-        return ret;
-}
-
-int netable_msgget(const nid_t *nid, void *buf, int len)
-{
-        UNIMPLEMENTED(__WARN__);
-
-        (void) nid;
-        (void) buf;
-        (void) len;
-
-        return 0;
-}
-
-int netable_msgpop(const nid_t *nid, void *buf, int len)
-{
-        UNIMPLEMENTED(__WARN__);
-
-        (void) nid;
-        (void) buf;
-        (void) len;
-
-        return 0;
 }

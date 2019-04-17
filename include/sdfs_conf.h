@@ -70,7 +70,7 @@
 #define MAX_MSG_LEN     (1024 * 16)
 #define BIG_BUF_LEN     (1024 * 512)
 
-#define PAGE_SIZE (1024 * 32)
+#define PAGE_SIZE (1024 * 4)
 #define SDFS_BLOCK_SIZE 512
 
 #define RW_TIMEOUT gloconf.rpc_timeout
@@ -199,7 +199,7 @@ typedef struct {
 #pragma pack()
 
 #define MAX_NODEID_LEN 128
-#define BUFFER_SEG_SIZE PAGE_SIZE
+#define BUFFER_SEG_SIZE (1024 * 1024)
 
 #define SEC_PER_MIN                 (60)
 #define SEC_PER_HOU                 (60 * 60)
@@ -221,20 +221,43 @@ typedef struct {
 #define ETCD_CDS "cds"
 #define ETCD_DISKMAP "diskmap"
 
-#define ENABLE_LOCAL_RPC 1
 #define ENABLE_HEARTBEAT 1
 
-#define ENABLE_NEWMD 1
 #define ENABLE_CORENET 1
-#define ENABLE_CORERPC 0
-#define ENABLE_COREAIO 0
+#define ENABLE_CORERPC 1
+#define ENABLE_COREAIO 1
+#define ENABLE_COREAIO_THREAD 0
 
 #define ENABLE_QUOTA 0
 #define ENABLE_MD_POSIX 0
-#define ENABLE_KLOCK 0
+#define ENABLE_KLOCK 1
 
 #define SDFS_SYSTEM_VOL "system"
 
-#define REDIS_CONN_POOL 32
+#define REDIS_CONN_POOL 64
+
+#define ENABLE_CO_WORKER 1
+
+#if ENABLE_CO_WORKER
+#define ENABLE_REDIS_CO 1
+#else
+#define ENABLE_CORE_PIPELINE 1
+#endif
+
+#define ENABLE_REDIS_PIPELINE 0
+
+#define ENABLE_LOCK_FREE_LIST 0
+
+#define ENABLE_ATTR_QUEUE 1
+
+#define MAX_READDIR_ENTRIES 400
+
+#define YFS_META_VERSION "meta (2017Q3)\n"
+
+#define FAKE_BLOCK 4096
+
+#define ATTR_QUEUE_TMO 5
+
+#define ENABLE_MEM_CACHE1 0
 
 #endif

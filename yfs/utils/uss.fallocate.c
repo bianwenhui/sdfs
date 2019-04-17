@@ -86,7 +86,7 @@ int main(int argc, char *argv[])
         }
 
         md = (void *)buf;
-        ret = md_getattr((void *)md, &fileid);
+        ret = md_getattr(&fileid, (void *)md);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -95,7 +95,7 @@ int main(int argc, char *argv[])
                 goto out;       /* not file */
         }
 
-        ret = sdfs_getattr(&fileid, &stbuf);
+        ret = sdfs_getattr(NULL, &fileid, &stbuf);
         if (ret)
                 GOTO(err_ret, ret);
 

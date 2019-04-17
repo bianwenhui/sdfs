@@ -32,7 +32,7 @@ static fileid_t __idarray__[roottype_max];
 //static const char *__type__[roottype_max] = {"fs", "user", "group", "share", "quota"};
 static const char *__type__[roottype_max] = {"user", "group", "share", "quota"};
 
-static int __md_root_create(const char *type, uint64_t volid)
+static int __md_root_create(const char *type, uint64_t _volid)
 {
         int ret, valuelen;
         fileid_t fileid;
@@ -51,6 +51,7 @@ static int __md_root_create(const char *type, uint64_t volid)
 
         //int t = (strcmp(type, ROOT_FS) == 0) ? ftype_vol : ftype_tab;
         int t = ftype_tab;
+        volid_t volid = {_volid, 0};
         ret = md_attr_getid(&fileid, NULL, t, &volid);
         if (unlikely(ret))
                 GOTO(err_ret, ret);
@@ -144,7 +145,7 @@ int md_root_init()
         int ret, i;
 
         YASSERT(__inited__ == 0);
-
+        
         for (i = 0; i < roottype_max; i++) {
                 ret = __md_root_load(__type__[i], &__idarray__[i]);
                 if (unlikely(ret))

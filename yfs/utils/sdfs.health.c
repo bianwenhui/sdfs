@@ -483,7 +483,7 @@ static int __file_scan(const fileid_t *fileid, itor_ctx_t *ctx)
 
         (void) ctx;
         
-        ret = md_getattr((void *)&md, fileid);
+        ret = md_getattr(NULL, fileid, (void *)&md);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -569,7 +569,7 @@ static int __redis_scan(const char *volume, int sharding, rept_t *rept)
         }
 
         int port = atoi(list[1]);
-        ret = redis_connect(&conn, list[0], &port);
+        ret = redis_connect(&conn, list[0], &port, key);
         if(ret)
                 GOTO(err_ret, ret);
 
@@ -600,7 +600,7 @@ int __health_redis_online(const char *_addr)
         }
 
         int port = atoi(list[1]);
-        ret = redis_connect(&conn, list[0], &port);
+        ret = redis_connect(&conn, list[0], &port, "");
         if (ret)
                 return 0;
         else {
@@ -717,7 +717,7 @@ err_ret:
 static int __health_dump()
 {
         int ret, i;
-        etcd_node_t *array, *node;
+        etcd_node_t *array, *node = NULL;
 
         ret = etcd_list(ETCD_VOLUME, &array);
         if (ret)

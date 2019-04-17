@@ -3,7 +3,7 @@
 
 #include <sys/epoll.h>
 #include <semaphore.h>
-#include <libaio.h>
+#include <linux/aio_abi.h>         /* Defines needed types */
 #include <pthread.h>
 
 #if ENABLE_RDMA
@@ -89,14 +89,21 @@ typedef struct __core {
         struct list_head poller_list;
 } core_t;
 
-#define CORE_FLAG_PASSIVE 0x0001
-#define CORE_FLAG_AIO     0x0002
+#define CORE_FLAG_ACTIVE  0x0001
+#define CORE_FLAG_PASSIVE 0x0002
+#define CORE_FLAG_AIO     0x0004
+#define CORE_FLAG_REDIS   0x0008
+#define CORE_FLAG_PRIVATE 0x0010
+#define CORE_FLAG_POLLING 0x0020
 
-int core_init(int flag);
+int core_create(core_t **_core, const char *name, int hash, int flag);
+int core_init(int polling_core, int flag);
 
+#if 0
 int core_spdk_init(int flag);
+#endif
 int core_init_register(func_t init, void *_ctx, const char *name);
-void core_check_register(int hash, const char *name, void *opaque, func1_t func);
+void core_check_register(core_t *core, const char *name, void *opaque, func1_t func);
 
 int core_hash(const fileid_t *fileid);
 int core_attach(int hash, const sockid_t *sockid, const char *name, void *ctx,
@@ -104,8 +111,10 @@ int core_attach(int hash, const sockid_t *sockid, const char *name, void *ctx,
 core_t *core_get(int hash);
 core_t *core_self();
 
-int core_request0(int hash, func_t exec, void *_ctx, const char *name);
+int core_worker_exit(core_t *core);
+int core_request_async(int hash, int priority, const char *name, func_t exec, void *arg);
 int core_request(int hash, int priority, const char *name, func_va_t exec, ...);
+int core_request_new(core_t *core, int priority, const char *name, func_va_t exec, ...);
 void core_check_dereg(const char *name, void *opaque);
 void core_register_tls(int type, void *ptr);
 
@@ -116,6 +125,10 @@ int core_dump_memory(uint64_t *memory);
 
 int core_poller_register(core_t *core, const char *name, void (*poll)(void *,void*), void *user_data);
 int core_poller_unregister(core_t *core, void (*poll)());
+
+#if ENABLE_CORE_PIPELINE
+int core_pipeline_send(const sockid_t *sockid, buffer_t *buf, int flag);
+#endif
 
 #define CORE_ANALYSIS_BEGIN(mark)               \
         struct timeval t1##mark, t2##mark;      \
@@ -136,16 +149,6 @@ int core_poller_unregister(core_t *core, void (*poll)());
                 }                                                       \
         }                                                               \
 
-#if 1
-//just for compatible, will be removed
-inline static uint64_t core_latency_get()
-{
-        UNIMPLEMENTED(__WARN__);
-
-        return 0;
-}
-#else
 uint64_t core_latency_get();
-#endif
 
 #endif

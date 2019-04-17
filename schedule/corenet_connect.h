@@ -2,10 +2,14 @@
 #define __CORENET_CONNECT_H__
 
 
-int corenet_tcp_connect(const nid_t *nid, sockid_t *sockid);
+int corenet_tcp_connect(const nid_t *nid, uint32_t addr, uint32_t port, sockid_t *sockid);
 int corenet_tcp_passive();
-int corenet_rdma_connect(const nid_t *nid, sockid_t *sockid);
+int corenet_tcp_getinfo(char *infobuf, uint32_t *infobuflen);
+
+#if ENABLE_RDMA
+int corenet_rdma_connect(const nid_t *nid, uint32_t addr, sockid_t *sockid);
 int corenet_rdma_passive();
+#endif
 /** @file 不同节点上多个core间的RPC.
  *
  * CORE地址： <nid, core hash>

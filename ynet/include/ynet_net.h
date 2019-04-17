@@ -120,7 +120,6 @@ typedef struct {
         uint32_t len; /*length of the info*/
         uint32_t uptime;
         nid_t id;
-        //char rack[MAX_NODEID_LEN];
         char name[MAX_NODEID_LEN];
         char nodeid[MAX_NODEID_LEN];
         uint32_t magic;
@@ -162,8 +161,6 @@ static inline int str2netinfo(ynet_net_info_t *info, const char *buf)
                 ret = EAGAIN;
                 GOTO(err_ret, ret);
         }
-
-        YASSERT(ret == 7);
 
         addrs = strstr(buf, "info:") + 5;
         for (i = 0; i < info->info_count; ++i) {
@@ -207,7 +204,8 @@ static inline void netinfo2str(char *buf, const ynet_net_info_t *info)
         
         for (i = 0; i < info->info_count; i++) {
                 sock = &info->info[i];
-                snprintf(buf + strlen(buf), MAX_NAME_LEN, "%s/%u,", _inet_ntoa(sock->addr), ntohs(sock->port));
+                snprintf(buf + strlen(buf), MAX_NAME_LEN, "%s/%u,",
+                         _inet_ntoa(sock->addr), ntohs(sock->port));
         }
 
         //DINFO("\n%s\n", buf);

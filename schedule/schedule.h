@@ -19,6 +19,12 @@
 #include <errno.h>
 #include <pthread.h>
 
+#define ENABLE_SCHEDULE_LL 0
+
+#if ENABLE_SCHEDULE_LL
+#include <ll.h>
+#endif
+
 #include "ylib.h"
 #include "dbg.h"
 #include "sdfs_list.h"
@@ -26,17 +32,25 @@
 #include "configure.h"
 #include "analysis.h"
 
+#define SCHEDULE_REPLY_NEW 1
+
+#define ENABLE_SCHEDULE_SELF_DEBUG 1
+#define ENABLE_SCHEDULE_STACK_ASSERT 1
+
 #define SCHEDULE_CHECK_RUNTIME ENABLE_SCHEDULE_CHECK_RUNTIME
 
 #define TASK_MAX (8192)
 
 #define REQUEST_QUEUE_STEP 128
-#define REQUEST_QUEUE_MAX TASK_MAX * 4
+#define REQUEST_QUEUE_MAX (TASK_MAX * 1)
 
 #define REPLY_QUEUE_STEP 128
 #define REPLY_QUEUE_MAX TASK_MAX
+#define SCHE_NAME_LEN 32
 
+#if 1
 #define NEW_SCHED
+#endif
 
 #ifndef NEW_SCHED
 #define swapcontext1 swapcontext
@@ -45,6 +59,25 @@
 #define SCHEDULE_STATUS_NONE 0
 #define SCHEDULE_STATUS_IDLE 1
 #define SCHEDULE_STATUS_RUNNING 2
+
+#if SCHEDULE_REPLY_NEW
+
+typedef struct reply_remote {
+        struct list_head hook;
+        buffer_t buf;
+        task_t task;
+        int retval;
+#if ENABLE_SCHEDULE_LL
+        LL_ENTRY(reply_remote)entry;
+#endif
+} reply_remote_t;
+
+#if ENABLE_SCHEDULE_LL
+LL_HEAD(reply_remote_list, reply_remote);
+LL_GENERATE(reply_remote_list, reply_remote, entry);
+#endif
+
+#endif
 
 typedef enum {
         TASK_STAT_FREE = 10, //0
@@ -134,7 +167,7 @@ typedef struct {
         void *buf;
         int8_t priority;
         task_t parent;
-        char name[32];
+        char name[SCHE_NAME_LEN];
 } request_t;
 
 typedef struct {
@@ -196,7 +229,7 @@ typedef struct schedule_t {
         struct list_head running_task_list;
 
         // free task list
-        struct list_head free_task_list;
+        count_list_t free_task;
 
         // 若tasks满，缓存到wait_task
         count_list_t wait_task;
@@ -209,7 +242,18 @@ typedef struct schedule_t {
 
         // resume相关, local是本调度器上的任务，remote是跨core任务(需要MT同步）
         reply_queue_t reply_local;
+
+#if SCHEDULE_REPLY_NEW
+#if ENABLE_SCHEDULE_LL
+        struct reply_remote_list reply_remote_lfl;
+#else
+        sy_spinlock_t reply_remote_lock;
+        struct list_head reply_remote_list;
+#endif
+
+#else
         reply_queue_t reply_remote;
+#endif
 
         // backtrace
         uint32_t sequence;
@@ -228,7 +272,7 @@ typedef enum {
 } task_type_t;
 
 int schedule_init();
-void schedule_destroy();
+void schedule_destroy(schedule_t *schedule);
 
 int schedule_create(int *eventfd, const char *name, int *idx, schedule_t **_schedule, void *private_mem);
 
@@ -241,10 +285,10 @@ int schedule_stat(int *sid, int *taskid, int *rq, int *runable, int *wait_task, 
 
 
 // task/coroutine相关, 切换task状态
-int schedule_request(schedule_t *schedule, int priority, void (*exec)(void *buf), void *buf, const char *name);
+int schedule_request(schedule_t *schedule, int priority, func_t exec, void *buf, const char *name);
 
 void schedule_task_new(const char *name, func_t func, void *arg, int priority);
-void schedule_task_new1(const char *name, func_t func, void *arg, int priority);
+void schedule_task_new1(const char *name, func_t func, void *arg, int priority, int tc);
 
 /** 有副作用，两次schedule_task_get调用之间，必须有schedule_yield
  *

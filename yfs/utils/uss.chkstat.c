@@ -85,7 +85,7 @@ int main(int argc, char *argv[])
 
 	cid2fid(&fileid, &chkid);
         md = (void *)buf;
-        ret = md_getattr((void *)md, &fileid);
+        ret = md_getattr(&fileid, (void *)md);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -93,7 +93,7 @@ int main(int argc, char *argv[])
 
 #if 0
         if (S_ISREG((stbuf).st_mode)) {
-                ret = sdfs_getattr(&fileid, &stbuf);
+                ret = sdfs_getattr(NULL, &fileid, &stbuf);
                 if (ret) {
                         size = 0;
                 } else {

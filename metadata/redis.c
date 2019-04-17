@@ -1,5 +1,4 @@
-
-//#include <hircluster.h>
+#include <sys/eventfd.h>
 
 #define DBG_SUBSYS S_YFSLIB
 
@@ -7,6 +6,8 @@
 #include "redis_util.h"
 #include "redis.h"
 #include "redis_conn.h"
+#include "redis_pipeline.h"
+#include "redis_co.h"
 #include "configure.h"
 #include "net_global.h"
 #include "dbg.h"
@@ -18,24 +19,42 @@
 #include "md_lib.h"
 #include "math.h"
 
+typedef enum {
+        __type_sche__,
+        __type_sem__,
+} type_t;
+
+typedef struct {
+        struct list_head hook;
+        func_va_t exec;
+        va_list ap;
+        int type;
+        task_t task;
+        int retval;
+        sem_t sem;
+} entry_t;
+
+typedef struct {
+        int idx;
+        sy_spinlock_t lock;
+        struct list_head list;
+        sem_t sem;
+        int eventfd;
+} redis_worker_t;
+
 static int __seq__ = 0;
+ __thread int __redis_workerid__ = -1;
+static redis_worker_t *__redis_worker__;
+static int __worker_count__ = 0;
+int __redis_conn_pool__ = -1;
+__thread int __redis_conn_pool_private__ = -1;
+int __use_pipeline__ = 0;
+extern __thread int __use_co__;
 
-#define ASYNC 1
+static int __redis_request(const int hash, const char *name, func_va_t exec, ...);
 
-int init_redis()
-{
-        int ret;
-
-        ret = redis_conn_init();
-        if(ret)
-                GOTO(err_ret, ret);
-
-        return 0;
-err_ret:
-        return ret;
-}
-
-static int __hget__(const fileid_t *fileid, const char *name, char *value, size_t *size)
+static int __hget__(const volid_t *volid, const fileid_t *fileid, const char *name,
+                    char *value, size_t *size)
 {
         int ret, retry = 0;
         char key[MAX_PATH_LEN];
@@ -44,9 +63,9 @@ static int __hget__(const fileid_t *fileid, const char *name, char *value, size_
         ANALYSIS_BEGIN(0);
         
         id2key(ftype(fileid), fileid, key);
-
+        
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
         
@@ -74,6 +93,7 @@ err_ret:
 
 static int __hget(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
         const char *name = va_arg(ap, const char *);
         char *value = va_arg(ap, char *);
@@ -81,24 +101,40 @@ static int __hget(va_list ap)
 
         va_end(ap);
 
-        return __hget__(fileid, name, value, size);
+        return __hget__(volid, fileid, name, value, size);
 }
 
-int hget(const fileid_t *fileid, const char *name, char *value, size_t *size)
+int hget(const volid_t *volid, const fileid_t *fileid, const char *name,
+         char *value, size_t *size)
 {
-        YASSERT(fileid->type);
+        int ret;
 
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "hget", -1, __hget,
-                                          fileid, name, value, size);
-        } else {
-                return __hget__(fileid, name, value, size);
+        YASSERT(fileid->type);
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
         }
+
+        YASSERT(volid);
+
+        ANALYSIS_BEGIN(0);
+
+        if (__use_co__) { 
+                ret = co_hget(volid, fileid, name, value, size);
+        } else if (__use_pipeline__) {
+                ret = pipeline_hget(volid, fileid, name, value, size);
+        } else  {
+                ret =  __redis_request(fileid_hash(fileid), "hget", __hget,
+                                       volid, fileid, name, value, size);
+        }
+
+        ANALYSIS_QUEUE(0, IO_WARN, NULL);
+        
+        return ret;
 }
 
-
-static int __hset__(const fileid_t *fileid, const char *name, const void *value, uint32_t size, int flag)
+static int __hset__(const volid_t *volid, const fileid_t *fileid,
+                    const char *name, const void *value, uint32_t size, int flag)
 {
         int ret, retry = 0;
         char key[MAX_PATH_LEN];
@@ -109,7 +145,7 @@ static int __hset__(const fileid_t *fileid, const char *name, const void *value,
         id2key(ftype(fileid), fileid, key);
 
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
 
@@ -144,6 +180,7 @@ err_ret:
 
 static int __hset(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
         const char *name = va_arg(ap, const char *);
         const char *value = va_arg(ap, const char *);
@@ -152,22 +189,37 @@ static int __hset(va_list ap)
 
         va_end(ap);
 
-        return __hset__(fileid, name, value, size, flag);
+        return __hset__(volid, fileid, name, value, size, flag);
 }
 
-
-int hset(const fileid_t *fileid, const char *name, const void *value, uint32_t size, int flag)
+int hset(const volid_t *volid, const fileid_t *fileid, const char *name,
+         const void *value, uint32_t size, int flag)
 {
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "hset", -1, __hset,
-                                          fileid, name, value, size, flag);
-        } else {
-                return __hset__(fileid, name, value, size, flag);
+        int ret;
+        
+        ANALYSIS_BEGIN(0);
+
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
         }
+
+        YASSERT(volid->volid);
+        if (__use_co__) { 
+                ret = co_hset(volid, fileid, name, value, size, flag);
+        } else if (__use_pipeline__) {
+                ret = pipeline_hset(volid, fileid, name, value, size, flag);
+        } else {
+                ret = __redis_request(fileid_hash(fileid), "hset", __hset,
+                                      volid, fileid, name, value, size, flag);
+        }
+
+        ANALYSIS_QUEUE(0, IO_WARN, NULL);
+        
+        return ret;
 }
 
-static int __hlen__(const fileid_t *fileid, uint64_t *count)
+static int __hlen__(const volid_t *volid, const fileid_t *fileid, uint64_t *count)
 {
         int ret, retry = 0;
         char key[MAX_PATH_LEN];
@@ -176,7 +228,7 @@ static int __hlen__(const fileid_t *fileid, uint64_t *count)
         id2key(ftype(fileid), fileid, key);
 
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
         
@@ -202,27 +254,42 @@ err_ret:
 
 static int __hlen(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
         uint64_t *count = va_arg(ap, uint64_t *);
 
         va_end(ap);
 
-        return __hlen__(fileid, count);
+        return __hlen__(volid, fileid, count);
 }
 
-
-int hlen(const fileid_t *fileid, uint64_t *count)
+int hlen(const volid_t *volid, const fileid_t *fileid, uint64_t *count)
 {
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "hlen", -1, __hlen,
-                                          fileid, count);
-        } else {
-                return __hlen__(fileid, count);
+        int ret;
+
+        ANALYSIS_BEGIN(0);
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
         }
+
+        if (__use_co__) { 
+                ret = co_hlen(volid, fileid, count);
+        } else if (__use_pipeline__) {
+                ret = pipeline_hlen(volid, fileid, count);
+        } else {
+                ret = __redis_request(fileid_hash(fileid), "hlen", __hlen,
+                                      volid, fileid, count);
+
+        }
+
+        ANALYSIS_QUEUE(0, IO_WARN, NULL);
+
+        return ret;
 }
 
-redisReply *__hscan__(const fileid_t *fileid, const char *match, uint64_t cursor, uint64_t count)
+redisReply *__hscan__(const volid_t *volid, const fileid_t *fileid,
+                      const char *match, uint64_t cursor, uint64_t count)
 {
         int ret, retry = 0;
         char key[MAX_PATH_LEN];
@@ -230,16 +297,19 @@ redisReply *__hscan__(const fileid_t *fileid, const char *match, uint64_t cursor
         redisReply *reply;
 
         id2key(ftype(fileid), fileid, key);
-
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
-        if(ret)
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
+        if(ret) {
+                DWARN("retry %u\n", retry);
+                USLEEP_RETRY(err_ret, ret, retry, retry, 100, (100 * 1000));
                 GOTO(err_ret, ret);
+        }
         
         reply = redis_hscan(handler.conn, key, match, cursor, count);
         if (reply == NULL) {
                 redis_conn_close(&handler);
                 redis_conn_release(&handler);
+                DWARN("retry %u\n", retry);
                 USLEEP_RETRY(err_ret, ret, retry, retry, 100, (100 * 1000));
         }
 
@@ -247,11 +317,13 @@ retry:
         
         return reply;
 err_ret:
+        UNIMPLEMENTED(__DUMP__);
         return NULL;
 }
 
 static int __hscan(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
         const char *match = va_arg(ap, const char *);
         uint64_t cursor = va_arg(ap, uint64_t);
@@ -260,36 +332,36 @@ static int __hscan(va_list ap)
 
         va_end(ap);
 
-        *_redisReply = __hscan__(fileid, match, cursor, count);
+        *_redisReply = __hscan__(volid, fileid, match, cursor, count);
         return 0;
 }
 
 
-redisReply *hscan(const fileid_t *fileid, const char *match, uint64_t cursor, uint64_t count)
+redisReply *hscan(const volid_t *volid, const fileid_t *fileid, const char *match,
+                  uint64_t cursor, uint64_t count)
 {
-        if (likely(schedule_running() && ASYNC)) {
-                redisReply *reply;
-                schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                   "hscan", -1, __hscan,
-                                   fileid, match, cursor, count, &reply);
-
-                return reply;
-        } else {
-                return __hscan__(fileid, match, cursor, count);
+        redisReply *reply;
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
         }
+
+        __redis_request(fileid_hash(fileid), "hscan", __hscan,
+                        volid, fileid, match, cursor, count, &reply);
+
+        return reply;
 }
 
 
-static int __hdel__(const fileid_t *fileid, const char *name)
+static int __hdel__(const volid_t *volid, const fileid_t *fileid, const char *name)
 {
         int ret, retry = 0;
         char key[MAX_PATH_LEN];
         redis_handler_t handler;
 
         id2key(ftype(fileid), fileid, key);
-
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
         
@@ -315,36 +387,42 @@ err_ret:
 
 static int __hdel(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
         const char *name = va_arg(ap, const char *);
 
         va_end(ap);
 
-        return __hdel__(fileid, name);
+        return __hdel__(volid, fileid, name);
 }
 
 
-int hdel(const fileid_t *fileid, const char *name)
+int hdel(const volid_t *volid, const fileid_t *fileid, const char *name)
 {
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "hdel", -1, __hdel,
-                                          fileid, name);
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
+        }
+
+        if (__use_co__) { 
+                return co_hdel(volid, fileid, name);
+        } else if (__use_pipeline__) {
+                return pipeline_hdel(volid, fileid, name);
         } else {
-                return __hdel__(fileid, name);
+                return __redis_request(fileid_hash(fileid), "hdel", __hdel,
+                                       volid, fileid, name);
         }
 }
 
-static int __kget__(const fileid_t *fileid, void *value, size_t *size)
+static int __kget__(const volid_t *volid, const fileid_t *fileid, void *value, size_t *size)
 {
         int ret, retry = 0;
         char key[MAX_PATH_LEN];
         redis_handler_t handler;
 
         id2key(ftype(fileid), fileid, key);
-
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
         
@@ -371,37 +449,47 @@ err_ret:
 
 static int __kget(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
         void *value = va_arg(ap, void *);
         size_t *size = va_arg(ap, size_t *);
 
         va_end(ap);
 
-        return __kget__(fileid, value, size);
+        return __kget__(volid, fileid, value, size);
 }
 
-
-int kget(const fileid_t *fileid, void *value, size_t *size)
+int kget(const volid_t *volid, const fileid_t *fileid, void *value, size_t *size)
 {
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "kget", -1, __kget,
-                                          fileid, value, size);
-        } else {
-                return __kget__(fileid, value, size);
+        int ret;
+
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
         }
+
+        if (__use_co__) { 
+                ret = co_kget(volid, fileid, value, size);
+        } else if (__use_pipeline__) {
+                ret = pipeline_kget(volid, fileid, value, size);
+        } else {
+                ret = __redis_request(fileid_hash(fileid), "kget", __kget,
+                                      volid, fileid, value, size);
+        }
+
+        return ret;
 }
 
-static int __kset__(const fileid_t *fileid, const void *value, size_t size, int flag)
+static int __kset__(const volid_t *volid, const fileid_t *fileid,
+                    const void *value, size_t size, int flag)
 {
         int ret, retry = 0;
         char key[MAX_PATH_LEN];
         redis_handler_t handler;
 
         id2key(ftype(fileid), fileid, key);
-
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
         
@@ -428,6 +516,7 @@ err_ret:
 
 static int __kset(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
         const void *value = va_arg(ap, const void *);
         size_t size = va_arg(ap, size_t);
@@ -435,31 +524,39 @@ static int __kset(va_list ap)
 
         va_end(ap);
 
-        return __kset__(fileid, value, size, flag);
+        return __kset__(volid, fileid, value, size, flag);
 }
 
-
-int kset(const fileid_t *fileid, const void *value, size_t size, int flag)
+int kset(const volid_t *volid, const fileid_t *fileid, const void *value, size_t size, int flag)
 {
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "kset", -1, __kset,
-                                          fileid, value, size, flag);
-        } else {
-                return __kset__(fileid, value, size, flag);
+        int ret;
+        
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
         }
+
+        if (__use_co__) { 
+                ret = co_kset(volid, fileid, value, size, flag, -1);
+        } else if (__use_pipeline__) {
+                ret = pipeline_kset(volid, fileid, value, size, flag, -1);
+        } else {
+                ret = __redis_request(fileid_hash(fileid), "kset", __kset,
+                                      volid, fileid, value, size, flag);
+        }
+
+        return ret;
 }
 
-static int __kdel__(const fileid_t *fileid)
+static int __kdel__(const volid_t *volid, const fileid_t *fileid)
 {
         int ret, retry = 0;
         char key[MAX_PATH_LEN];
         redis_handler_t handler;
 
         id2key(ftype(fileid), fileid, key);
-
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
         
@@ -485,33 +582,40 @@ err_ret:
 
 static int __kdel(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
 
         va_end(ap);
 
-        return __kdel__(fileid);
+        return __kdel__(volid, fileid);
 }
 
 
-int kdel(const fileid_t *fileid)
+int kdel(const volid_t *volid, const fileid_t *fileid)
 {
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "kdel", -1, __kdel,
-                                          fileid);
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
+        }
+
+        if (__use_co__) { 
+                return co_kdel(volid, fileid);
+        } else if (__use_pipeline__) {
+                return pipeline_kdel(volid, fileid);
         } else {
-                return __kdel__(fileid);
+                return __redis_request(fileid_hash(fileid), "kdel", __kdel,
+                                       volid, fileid);
         }
 }
 
-static int __klock1(const fileid_t *fileid, int ttl)
+static int __klock1(const volid_t *volid, const fileid_t *fileid, int ttl)
 {
         int ret, retry = 0;
         redis_handler_t handler;
         char key[MAX_PATH_LEN], value[MAX_BUF_LEN];
 
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
 
@@ -537,12 +641,12 @@ err_ret:
         return ret;
 }
 
-static int __klock__(const fileid_t *fileid, int ttl, int block)
+static int __klock__(const volid_t *volid, const fileid_t *fileid, int ttl, int block)
 {
         int ret, retry = 0;
 
 retry:
-        ret = __klock1(fileid, ttl);
+        ret = __klock1(volid, fileid, ttl);
         if(ret) {
                 if (ret == EEXIST && block) {
                         if (retry > 500 && retry % 100 == 0 ) {
@@ -562,25 +666,40 @@ err_ret:
 
 inline static int __klock(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
         int ttl = va_arg(ap, int);
         int block = va_arg(ap, int);
 
         va_end(ap);
 
-        return __klock__(fileid, ttl, block);
+        return __klock__(volid, fileid, ttl, block);
 }
 
-int klock(const fileid_t *fileid, int ttl, int block)
+int klock(const volid_t *volid, const fileid_t *fileid, int ttl, int block)
 {
-#if ENABLE_KLOCK
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "klock", -1, __klock,
-                                          fileid, ttl, block);
-        } else {
-                return __klock__(fileid, ttl, block);
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
         }
+
+#if ENABLE_KLOCK
+        int ret;
+        
+        ANALYSIS_BEGIN(0);
+
+        if (__use_co__) { 
+                ret = co_klock(volid, fileid, ttl, block);
+        } else if (__use_pipeline__) {
+                ret = pipeline_klock(volid, fileid, ttl, block);
+        } else {
+                ret = __redis_request(fileid_hash(fileid), "klock", __klock,
+                                      volid, fileid, ttl, block);
+        }
+
+        ANALYSIS_QUEUE(0, IO_WARN, NULL);
+
+        return ret;
 #else
         (void) fileid;
         (void) ttl;
@@ -589,14 +708,14 @@ int klock(const fileid_t *fileid, int ttl, int block)
 #endif
 }
 
-static int __kunlock__(const fileid_t *fileid)
+static int __kunlock__(const volid_t *volid, const fileid_t *fileid)
 {
         int ret, retry = 0;
         redis_handler_t handler;
         char key[MAX_PATH_LEN];
 
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
 
@@ -624,40 +743,52 @@ err_ret:
 
 inline static int __kunlock(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
 
         va_end(ap);
 
-        return __kunlock__(fileid);
+        return __kunlock__(volid, fileid);
 }
 
-
-int kunlock(const fileid_t *fileid)
+int kunlock(const volid_t *volid, const fileid_t *fileid)
 {
-#if ENABLE_KLOCK
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "kunlock", -1, __kunlock,
-                                          fileid);
-        } else {
-                return __kunlock__(fileid);
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
         }
+#if ENABLE_KLOCK
+        int ret;
+
+        ANALYSIS_BEGIN(0);
+
+        if (__use_co__) { 
+                ret = co_kunlock(volid, fileid);
+        } else if (__use_pipeline__) {
+                ret = pipeline_kunlock(volid, fileid);
+        } else {
+                ret = __redis_request(fileid_hash(fileid), "kunlock", __kunlock,
+                                      volid, fileid);
+        }
+
+        ANALYSIS_END(0, IO_WARN, NULL);
+        return ret;
 #else
         (void) fileid;
         return 0;
 #endif
 }
 
-static int __hiter__(const fileid_t *fileid, const char *match, func2_t func, void *ctx)
+static int __hiter__(const volid_t *volid, const fileid_t *fileid,
+                     const char *match, func2_t func, void *ctx)
 {
         int ret, retry = 0;
         char key[MAX_PATH_LEN];
         redis_handler_t handler;
 
         id2key(ftype(fileid), fileid, key);
-
 retry:
-        ret = redis_conn_get(fileid->volid, fileid->sharding, &handler);
+        ret = redis_conn_get(volid, fileid->sharding, __redis_workerid__, &handler);
         if(ret)
                 GOTO(err_ret, ret);
 
@@ -683,6 +814,7 @@ err_ret:
 
 static int __hiter(va_list ap)
 {
+        const volid_t *volid = va_arg(ap, const volid_t *);
         const fileid_t *fileid = va_arg(ap, const fileid_t *);
         const char *match = va_arg(ap, const char *);
         func2_t func = va_arg(ap, func2_t);
@@ -690,19 +822,20 @@ static int __hiter(va_list ap)
 
         va_end(ap);
 
-        return __hiter__(fileid, match, func, ctx);
+        return __hiter__(volid, fileid, match, func, ctx);
 }
 
 
-int hiter(const fileid_t *fileid, const char *match, func2_t func, void *ctx)
+int hiter(const volid_t *volid, const fileid_t *fileid, const char *match,
+          func2_t func, void *ctx)
 {
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "hiter", -1, __hiter,
-                                          fileid, match, func, ctx);
-        } else {
-                return __hiter__(fileid, match, func, ctx);
+        volid_t _volid = {fileid->volid, 0};
+        if (unlikely(volid == NULL)) {
+                volid = &_volid;
         }
+
+        return __redis_request(fileid_hash(fileid), "hiter", __hiter,
+                               volid, fileid, match, func, ctx);
 }
 
 static int __rm_push__(const nid_t *nid, int _hash, const chkid_t *chkid)
@@ -710,18 +843,23 @@ static int __rm_push__(const nid_t *nid, int _hash, const chkid_t *chkid)
         int ret, hash, retry = 0;
         redis_handler_t handler;
         char key[MAX_PATH_LEN], value[MAX_BUF_LEN];
-        uint64_t volid;
+        uint64_t sysvolid;
 
         hash = _hash == -1 ? (int)nid->id : _hash;
 
-        ret = md_system_volid(&volid);
+        ret = md_system_volid(&sysvolid);
         if(ret)
                 GOTO(err_ret, ret);
-        
+
+        volid_t volid = {sysvolid, 0};
 retry:
-        ret = redis_conn_get(volid, hash, &handler);
-        if(ret)
-                GOTO(err_ret, ret);
+        ret = redis_conn_get(&volid, hash, ++__seq__, &handler);
+        if(ret) {
+                if (ret == EBUSY) {
+                        USLEEP_RETRY(err_ret, ret, retry, retry, 1000, (10 * 1000));
+                } else 
+                        GOTO(err_ret, ret);
+        }
 
         snprintf(key, MAX_NAME_LEN, "cds[%d]", nid->id);
         base64_encode((void *)chkid, sizeof(*chkid), value);
@@ -743,8 +881,6 @@ err_release:
         redis_conn_release(&handler);
 err_ret:
         return ret;
-        
-                
 }
 
 static int __rm_push(va_list ap)
@@ -764,16 +900,9 @@ int rm_push(const nid_t *nid, int _hash, const chkid_t *chkid)
 
         DBUG("remove "CHKID_FORMAT" @ %s\n", CHKID_ARG(chkid), network_rname(nid));
         
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "rm_push", -1, __rm_push,
-                                          nid, _hash, chkid);
-        } else {
-                return __rm_push__(nid, _hash, chkid);
-        }
+        return __redis_request(++__seq__, "rm_push", __rm_push,
+                               nid, _hash, chkid);
 }
-
-
 
 typedef struct {
         const nid_t *nid;
@@ -820,18 +949,23 @@ static int __rm_pop__(const nid_t *nid, int _hash, chkid_t *array, int *count)
         redis_handler_t handler;
         char key[MAX_PATH_LEN];
         rm_pop_ctx_t ctx;
-        uint64_t volid;
+        uint64_t sysvolid;;
 
         hash = _hash == -1 ? (int)nid->id : _hash;
  
-        ret = md_system_volid(&volid);
+        ret = md_system_volid(&sysvolid);
         if(ret)
                 GOTO(err_ret, ret);
 
+        volid_t volid = {sysvolid, 0};
 retry:
-        ret = redis_conn_get(volid, hash, &handler);
-        if(ret)
-                GOTO(err_ret, ret);
+        ret = redis_conn_get(&volid, hash, ++__seq__, &handler);
+        if(ret) {
+                if (ret == EBUSY) {
+                        USLEEP_RETRY(err_ret, ret, retry, retry, 1000, (10 * 1000));
+                } else 
+                        GOTO(err_ret, ret);
+        }
 
         ctx.count = *count;
         ctx.idx = 0;
@@ -878,36 +1012,214 @@ static int __rm_pop(va_list ap)
 
 int rm_pop(const nid_t *nid, int _hash, chkid_t *array, int *count)
 {
-        if (likely(schedule_running() && ASYNC)) {
-                return schedule_newthread(SCHE_THREAD_REDIS, ++__seq__, FALSE,
-                                          "rm_pop", -1, __rm_pop,
-                                          nid, _hash, array, count);
-        } else {
-                return __rm_pop__(nid, _hash, array, count);
-        }
+        return __redis_request(++__seq__, "rm_pop", __rm_pop,
+                               nid, _hash, array, count);
 }
 
-struct sche_thread_ops redis_ops = {
-        .type           = SCHE_THREAD_REDIS,
-        .begin_trans    = NULL,
-        .commit_trans   = NULL,
-};
-
-static int __redis_ops_register()
-{
-        int size = ng.daemon ? 16 : 2;
-        return sche_thread_ops_register(&redis_ops, redis_ops.type, size);
-}
-
-int redis_init()
+static int __redis_worker_run(redis_worker_t *worker)
 {
         int ret;
+        struct list_head list, *pos, *n;
+        entry_t *ent;
 
-        ret = __redis_ops_register();
-        if (unlikely(ret))
-                GOTO(err_ret, ret);
-        
+        while (1) {
+                INIT_LIST_HEAD(&list);
+
+                ret = sy_spin_lock(&worker->lock);
+                if(ret)
+                        GOTO(err_ret, ret);
+
+                list_splice_init(&worker->list, &list);
+                
+                sy_spin_unlock(&worker->lock);
+
+                list_for_each_safe(pos, n, &list) {
+                        list_del(pos);
+                        ent = (void *)pos;
+
+                        ent->retval = ent->exec(ent->ap);
+
+                        if (ent->type == __type_sem__) {
+                                sem_post(&ent->sem);
+                        } else {
+                                schedule_resume(&ent->task, ent->retval, NULL);
+                        }
+                }
+
+                if (list_empty(&worker->list)) {
+                        break;
+                }
+        }
+
         return 0;
 err_ret:
         return ret;
+}
+
+static void *__redis_worker(void *arg)
+{
+        int ret;
+        redis_worker_t *worker = arg;
+
+        __redis_workerid__ = worker->idx;
+
+        sem_post(&worker->sem);
+        
+        while (1) {
+                eventfd_poll(worker->eventfd, 1, NULL);
+
+                ret = __redis_worker_run(worker);
+                if(ret)
+                        UNIMPLEMENTED(__DUMP__);
+        }
+
+        pthread_exit(NULL);
+}
+
+static int __redis_request__(const int hash, entry_t *ent)
+{
+        int ret;
+        uint64_t e = 1;
+        redis_worker_t *worker = &__redis_worker__[hash % __worker_count__];
+
+        ret = sy_spin_lock(&worker->lock);
+        if(ret)
+                GOTO(err_ret, ret);
+        
+        list_add_tail(&ent->hook, &worker->list);
+
+        sy_spin_unlock(&worker->lock);
+
+        ret = write(worker->eventfd, &e, sizeof(e));
+        if (ret < 0) {
+                ret = errno;
+                YASSERT(0);
+        }
+
+        return 0;
+err_ret:
+        return ret;
+}
+
+
+static int __redis_request(const int hash, const char *name, func_va_t exec, ...)
+{
+        int ret;
+        entry_t ctx;
+
+        ctx.exec = exec;
+        va_start(ctx.ap, exec);
+
+        ANALYSIS_BEGIN(0);
+
+        if (likely(schedule_running())) {
+                ctx.task = schedule_task_get();
+                ctx.type = __type_sche__;
+
+                ret = __redis_request__(hash, &ctx);
+                if (unlikely(ret))
+                        GOTO(err_ret, ret);
+
+                ret = schedule_yield1(name, NULL, NULL, NULL, -1);
+                if (unlikely(ret)) {
+                        GOTO(err_ret, ret);
+                }
+        } else {
+                ctx.type = __type_sem__;
+
+                ret = sem_init(&ctx.sem, 0, 0);
+                if (unlikely(ret))
+                        GOTO(err_ret, ret);
+
+                ret = __redis_request__(hash, &ctx);
+                if (unlikely(ret))
+                        GOTO(err_ret, ret);
+                
+                ret = sem_wait(&ctx.sem);
+                if (unlikely(ret))
+                        GOTO(err_ret, ret);
+
+                ret = ctx.retval;
+                if (unlikely(ret))
+                        GOTO(err_ret, ret);
+        }
+
+        ANALYSIS_END(0, IO_WARN, NULL);
+
+        return 0;
+err_ret:
+        ANALYSIS_END(0, IO_WARN, NULL);
+        return ret;
+}
+
+int redis_init(int _worker_count)
+{
+        int ret;
+        redis_worker_t *worker;
+        int worker_count = _worker_count * 4;
+
+        ret = ymalloc((void **)&__redis_worker__, sizeof(*__redis_worker__) * worker_count);
+        if (unlikely(ret))
+                GOTO(err_ret, ret);
+
+        for (int i = 0; i < worker_count; i++) {
+                worker = &__redis_worker__[i];
+                worker->idx = i;
+                ret = sy_spin_init(&worker->lock);
+                if (unlikely(ret))
+                        GOTO(err_ret, ret);
+
+                ret = sem_init(&worker->sem, 0, 0);
+                if (unlikely(ret))
+                        GOTO(err_ret, ret);
+
+                ret = eventfd(0, EFD_CLOEXEC);
+                if (unlikely(ret < 0)) {
+                        ret = errno;
+                        GOTO(err_ret, ret);
+                }
+
+                worker->eventfd = ret;
+                
+                INIT_LIST_HEAD(&worker->list);
+
+                ret = sy_thread_create2(__redis_worker, worker, "redis_worker");
+                if(ret)
+                        GOTO(err_ret, ret);
+
+                ret = sem_wait(&worker->sem);
+                if(ret)
+                        GOTO(err_ret, ret);
+        }
+
+        __worker_count__ = worker_count;
+        __redis_conn_pool__ = worker_count;
+
+        ret = redis_conn_init();
+        if(ret)
+                GOTO(err_ret, ret);
+        
+#if ENABLE_REDIS_PIPELINE
+        ret = redis_pipeline_init();
+        if(ret)
+                GOTO(err_ret, ret);
+#endif
+
+        return 0;
+err_ret:
+        return ret;
+}
+
+int redis_exec(const fileid_t *fileid, func_va_t exec, void *arg)
+{
+        return __redis_request(fileid_hash(fileid), "exec", exec, arg);
+}
+
+int redis_new_sharding(const volid_t *volid, uint8_t *idx)
+{
+        if (__use_co__) {
+                return co_newsharing(volid, idx);
+        } else {
+                return redis_conn_new(volid, idx);
+        }
 }

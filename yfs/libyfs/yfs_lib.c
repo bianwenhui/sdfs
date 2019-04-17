@@ -23,18 +23,20 @@
 #include "network.h"
 #include "redis.h"
 #include "bh.h"
+#include "core.h"
+#include "attr_queue.h"
 #include "io_analysis.h"
-#include "../../sdfs/replica_rpc.h"
+#include "../../cds/cds_rpc.h"
 #include "net_global.h"
-#include "dbg.h"
-#include "license_helper.h"
+#include "mem_hugepage.h"
+//#include "license_helper.h"
 #include "main_loop.h"
+#include "dbg.h"
 
 extern int is_daemon;
 extern jobtracker_t *jobtracker;
 
-extern mpool_t head_pool;
-extern analysis_t default_analysis;
+extern analysis_t *default_analysis;
 
 /*If more than Max_reboot number of restarts occur in the last Max_date seconds,*/
 /*then the supervisor terminates all the child processes and then itself.*/
@@ -308,7 +310,7 @@ static int __system_check()
         close(fd);
 
 #ifdef __CYGWIN__
-		return 0;
+        return 0;
 #endif
 
         if (memcmp("Linux version 3", buf, strlen("Linux version 3")) == 0) {
@@ -348,6 +350,7 @@ int need_license_check(const char *proname)
         return ret;
 }
 
+#if 0
 int ly_license_init(const char *name)
 {
 #ifdef __CYGWIN__
@@ -369,6 +372,7 @@ err_ret:
         return ret;
 #endif
 }
+#endif
 
 void ly_set_daemon()
 {
@@ -537,12 +541,16 @@ int init_stage1()
 
         fnotify_init();
         dmsg_init();
+
+        ret = mem_cache_init();
+        if (ret)
+                GOTO(err_ret, ret);
         
-        ret = buffer_pool_init(1024 * 10);
+        ret = mem_hugepage_init();
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = timer_init(0);
+        ret = timer_init(0, 0);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -560,12 +568,12 @@ int init_stage1()
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = jobtracker_create(&jobtracker, gloconf.yfs_jobtracker, "default");
+        ret = jobtracker_create(&jobtracker, 1, "default");
         if (ret)
                 GOTO(err_ret, ret);
 
         if (gloconf.performance_analysis) {
-                ret = analysis_create(&default_analysis, "default");
+                ret = analysis_create(&default_analysis, "default", 0);
                 if (unlikely(ret))             
                         GOTO(err_ret, ret);            
         }
@@ -585,7 +593,7 @@ err_ret:
         return ret;
 }
 
-int init_stage2(const char *name, int noroot)
+int init_stage2(const char *name, int noroot, int redis_conn)
 {
         int ret, thread;
         char home[MAX_PATH_LEN], path[MAX_PATH_LEN];
@@ -594,7 +602,7 @@ int init_stage2(const char *name, int noroot)
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = redis_init();
+        ret = redis_init(redis_conn);
         if (ret)
                 GOTO(err_ret, ret);
         
@@ -621,18 +629,22 @@ int init_stage2(const char *name, int noroot)
         ret = rpc_init(NULL, name, -1, home);
         if (ret)
                 GOTO(err_ret, ret);
-        
-        ret = rpc_passive(-1);
-        if (ret)
-                GOTO(err_ret, ret);
+
+        if (ng.daemon) {
+                ret = rpc_passive(-1);
+                if (ret)
+                        GOTO(err_ret, ret);
+        }
 
         ret = network_init();
         if (unlikely(ret))
                 GOTO(err_ret, ret);
 
-        ret = conn_init();
-        if (ret)
-                GOTO(err_ret, ret);
+        if (ng.daemon) {
+                ret = conn_init();
+                if (ret)
+                        GOTO(err_ret, ret);
+        }
  
         DINFO("stage2 inited\n");
         
@@ -671,7 +683,7 @@ int ly_init(int daemon, const char *name, int64_t maxopenfile)
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = init_stage2(name, __no_root__);
+        ret = init_stage2(name, __no_root__, 1);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -688,7 +700,7 @@ int ly_init(int daemon, const char *name, int64_t maxopenfile)
         if (ret)
                 GOTO(err_ret, ret);
 
-        ret = replica_rpc_init();
+        ret = cds_rpc_init();
         if (ret)
                 GOTO(err_ret, ret);
         
@@ -872,9 +884,11 @@ int ly_init_simple2(const char *name)
         ng.live = 0;
         is_daemon = 0;
 
+#if 0
         ret = ly_license_init(name);
         if (ret)
                 GOTO(err_ret, ret);
+#endif
 
         return 0;
 err_ret:
@@ -883,7 +897,7 @@ err_ret:
 
 int ly_init_simple(const char *name)
 {
-        int ret;
+        int ret, retry = 0;
 
         ret = ly_prep(0, name, -1);
         if (ret)
@@ -896,34 +910,68 @@ int ly_init_simple(const char *name)
         ng.live = 0;
         is_daemon = 0;
 
-        ret = network_connect_master();
-        if (ret)
-                GOTO(err_ret, ret);
+retry:
+        ret = network_connect_mond(0);
+        if (ret) {
+                USLEEP_RETRY(err_ret, ret, retry, retry, 10, (1000 * 1000));
+        }
 
+#if 0
         ret = ly_license_init(name);
         if (ret)
                 GOTO(err_ret, ret);
+#endif
 
         return 0;
 err_ret:
         return ret;
 }
 
-int sdfs_init_verbose(const char *name, int workdir, int daemon)
+int sdfs_init_verbose(const char *name, int polling_core)
 {
         int ret;
 
-        (void) workdir;
-
-        ret = ly_init(daemon, name, -1);
+#if ENABLE_CO_WORKER
+        polling_core = 1;
+#endif
+        
+        ret = init_stage1();
         if (ret)
                 GOTO(err_ret, ret);
+
+        ret = init_stage2(name, __no_root__, polling_core);
+        if (ret)
+                GOTO(err_ret, ret);
+
+        ret = init_stage3();
+        if (ret)
+                GOTO(err_ret, ret);
+
+        _fence_test1_init(ng.home);
+
+        ng.live = 1;
+        ng.uptime = time(NULL);
+
+        ret = md_init();
+        if (ret)
+                GOTO(err_ret, ret);
+
+        ret = cds_rpc_init();
+        if (ret)
+                GOTO(err_ret, ret);
+        
+        main_loop_start();
 
         ret = io_analysis_init(name, -1);
         if (ret)
                 GOTO(err_ret, ret);
+
+        ret = core_init(polling_core, CORE_FLAG_ACTIVE | CORE_FLAG_PRIVATE);
+        if (ret)
+                GOTO(err_ret, ret);
+
 retry:
-        ret = network_connect_master();
+        ret = network_connect_mond(0);
         if (ret) {
                 ret = _errno(ret);
                 if (ret == EAGAIN) {
@@ -940,5 +988,19 @@ err_ret:
 
 int sdfs_init(const char *name)
 {
-        return sdfs_init_verbose(name, -1, 0);
+        int ret;
+
+        ret = ly_prep(0, name, -1);
+        if(ret)
+                GOTO(err_ret, ret);
+
+        ly_set_daemon();
+        
+        ret = sdfs_init_verbose(name, gloconf.polling_core);
+        if (ret)
+                GOTO(err_ret, ret);
+
+        return 0;
+err_ret:
+        return ret;
 }

@@ -32,8 +32,8 @@ struct logconf_t logconf;
 struct yftp_conf_t yftp_conf;
 netconf_t netconf;
 
-uint32_t ylib_dbg = 0;
-uint32_t ylib_sub = 0;
+extern uint32_t ylib_dbg;
+extern uint32_t ylib_sub;
 
 /*注意随机的种子是 time(NULL)*/
 void _rand_str(char *dest, size_t length) {
@@ -132,20 +132,24 @@ int conf_init(const char *conf_path)
         mdsconf.disk_keep = (100 * 1024 * 1024 * 1024LL); /*100G*/
         nfsconf.rsize = 1048576;
         nfsconf.wsize = 1048576;
-        nfsconf.job_qos = 4096;
+        nfsconf.nfs_port = NFS_SERVICE_DEF;
+        nfsconf.nlm_port = NLM_SERVICE_DEF;
         memset(sanconf.iqn, 0x0, MAXSIZE);
         sanconf.lun_blk_shift = 9;
         gloconf.write_back = 1;
         gloconf.coredump = 1;
-        gloconf.backtrace = 1;
+        gloconf.backtrace = 0;
         gloconf.testing = 0;
         gloconf.rpc_timeout = 10;
         gloconf.hb_timeout = 5;
         gloconf.hb_retry = 3;
-        strcpy(gloconf.nfs, "native");
+        strcpy(gloconf.nfs_srv, "native");
         gloconf.lease_timeout = 20;
         mdsconf.redis_sharding = 3;
         mdsconf.redis_replica = 2;
+        mdsconf.redis_thread = 0;
+        mdsconf.ac_timeout = ATTR_QUEUE_TMO * 2;
+        //mdsconf.ac_timeout = 0;
         mdsconf.redis_baseport = REDIS_BASEPORT;
 
         snprintf(gloconf.workdir, MAX_PATH_LEN, "%s/data", SDFS_HOME);
@@ -156,32 +160,24 @@ int conf_init(const char *conf_path)
         cdsconf.disk_timeout = 60;
         cdsconf.unlink_async = 1;
         cdsconf.prealloc_max = 64 * 4;
-        cdsconf.ec_lock = 0;
         cdsconf.io_sync = 1;
-        cdsconf.lvm_qos_refresh = 1;
-        cdsconf.ha_mode = 0;
-        cdsconf.queue_depth = 127;
+        cdsconf.aio_thread = 0;
+        cdsconf.queue_depth = 128;
+        cdsconf.cds_polling = 0;
         gloconf.network = 0;
         gloconf.solomode = 0;
+        gloconf.memcache_count = 1024;
+        gloconf.memcache_seg = 1024 * 1024 * 2;
         gloconf.mask = 0;
         gloconf.maxcore = 1;
         memset(gloconf.cluster_name, 0x0, MAXSIZE);
         strcpy(gloconf.cluster_name, "uss");
+        strcpy(gloconf.uuid, "f7f67a9bf59e4f8096ff9222a12fa3c0");//fake uuid
         mdsconf.chknew_hardend = 1;
-        mdsconf.redis_wait = 2000;
-        mdsconf.redis_thread = 20;
-        mdsconf.redis_total = 512;
-        strcpy(mdsconf.db, "redis");
-        strcpy(mdsconf.leveldb, "/var/lib/leveldb");
-        mdsconf.leveldb_physical_package_id = -1; //默认不设置
-        mdsconf.schedule_physical_package_id = -1;
-        mdsconf.leveldb_queue = 6;
-        mdsconf.leveldb_queue_pb = 1;
-        mdsconf.leveldb_queue_worker = 1;
         mdsconf.main_loop_threads = 6;
+        mdsconf.size_on_md = 0;
 
         gloconf.performance_analysis = 0;
-        gloconf.io_mode = 1; /*0 is sequence, 1 is random*/
         gloconf.cache_size = (128 * 1024 * 1024LL);
         gloconf.net_crc = 0;
         gloconf.check_mountpoint = 1;
@@ -191,29 +187,20 @@ int conf_init(const char *conf_path)
         gloconf.restart = 1;
         gloconf.valgrind = 0;
         strcpy(gloconf.master_vip, "\0");
-        gloconf.dir_refresh  = 300;
-        strcpy(gloconf.polling_core, "8");
-        gloconf.polling_timeout = 3; //秒
-        strcpy(gloconf.aio_core, "0");
-        gloconf.file_refresh  = 10;
+        gloconf.polling_core = 8;
+        gloconf.polling_timeout = 0; //秒
+        gloconf.aio_core = 0;
         gloconf.wmem_max = SO_XMITBUF;
         gloconf.rmem_max = SO_XMITBUF;
         netconf.count = 0;
         gloconf.sdevents_threads = 4;
         gloconf.jobdock_size = 8192;
-        gloconf.yfs_jobtracker = 8;
-        gloconf.nfs_jobtracker = 2;
-        gloconf.objs_jobtracker = 2;
 
         gloconf.chunk_entry_max = 1024*102; //默认40M
 
         gloconf.disk_mt = 0; //默认 不开启
         gloconf.disk_mt_ssd = 128; //mt 线程数
         gloconf.disk_mt_hdd = 2;
-
-        gloconf.preload_chk = 1; //默认 开启
-
-        gloconf.lookup_cache = 0; //默认 关闭
 
         gloconf.disk_worker = 1;
 
@@ -479,7 +466,7 @@ int keyis(const char *src, const char *dst)
 int set_value(const char* key, const char* value, int type)
 {
         int vallen;
-        LLU _value;
+        LLU _value = 0;
 
         vallen = strlen(value);
 
@@ -507,8 +494,10 @@ int set_value(const char* key, const char* value, int type)
                 nfsconf.rsize = _value;
         else if (keyis("wsize", key))
                 nfsconf.wsize = _value;
-        else if (keyis("job_qos", key))
-                nfsconf.job_qos = _value;
+        else if (keyis("nlm_port", key))
+                nfsconf.nlm_port = _value;
+        else if (keyis("nfs_port", key))
+                nfsconf.nfs_port = _value;
 
         /**
          * yiscsi configure
@@ -539,18 +528,18 @@ int set_value(const char* key, const char* value, int type)
                 mdsconf.chknew_hardend = _value;
         else if (keyis("solomode", key))
                 gloconf.solomode = _value;
+        else if (keyis("memcache_count", key))
+                gloconf.memcache_count = _value;
+        else if (keyis("memcache_seg", key))
+                gloconf.memcache_seg = _value;
         else if (keyis("redis_sharding", key))
                 mdsconf.redis_sharding = _value;
         else if (keyis("redis_replica", key))
                 mdsconf.redis_replica = _value;
-        else if (keyis("redis_wait", key))
-                mdsconf.redis_wait = _value;
         else if (keyis("redis_thread", key))
                 mdsconf.redis_thread = _value;
-        else if (keyis("redis_total", key))
-                mdsconf.redis_total = _value;
-        else if (keyis("schedule_physical_package_id", key))
-                mdsconf.schedule_physical_package_id = _value;
+        else if (keyis("ac_timeout", key))
+                mdsconf.ac_timeout = _value;
         else if (keyis("main_loop_threads ", key)) {
                 mdsconf.main_loop_threads = _value;
         }
@@ -560,20 +549,18 @@ int set_value(const char* key, const char* value, int type)
          */
         else if (keyis("unlink_async", key))
                 cdsconf.unlink_async = _value;
-        else if (keyis("ha_mode", key))
-                cdsconf.ha_mode = _value;
         else if (keyis("queue_depth", key))
                 cdsconf.queue_depth = _value;
         else if (keyis("cache_size", key))
                 gloconf.cache_size = _value;
         else if (keyis("prealloc_max", key))
                 cdsconf.prealloc_max = _value;
-        else if (keyis("ec_lock", key))
-                cdsconf.ec_lock = _value;
         else if (keyis("io_sync", key))
                 cdsconf.io_sync = _value;
-        else if (keyis("lvm_qos_refresh", key))
-                cdsconf.lvm_qos_refresh = _value;
+        else if (keyis("aio_thread", key))
+                cdsconf.aio_thread = _value;
+        else if (keyis("cds_polling", key))
+                cdsconf.cds_polling = _value;
         /**
          * global configure
          */
@@ -581,17 +568,6 @@ int set_value(const char* key, const char* value, int type)
                 gloconf.write_back = _value;
         else if (keyis("performance_analysis", key))
                 gloconf.performance_analysis = _value;
-        else if (keyis("io_mode", key)) {
-                if (strcmp(value, "sequence")  == 0)
-                        gloconf.io_mode = 0;
-                else if (strcmp(value, "random")  == 0)
-                        gloconf.io_mode = 0;
-                else {
-                        printf("only 'random' or 'sequence' is accepted\n");
-                        exit(EINVAL);
-                }
-        }
-
         else if (keyis("rpc_timeout", key)) {
                 gloconf.rpc_timeout = _value;
         } else if (keyis("backtrace", key)) {
@@ -629,20 +605,16 @@ int set_value(const char* key, const char* value, int type)
                 gloconf.mask = ntohl(inet_addr(value));
         else if (keyis("cluster_name", key))
                 strncpy(gloconf.cluster_name, value, MAXSIZE);
-        else if (keyis("nfs", key))
-                strncpy(gloconf.nfs, value, MAXSIZE);
+        else if (keyis("nfs_srv", key))
+                strncpy(gloconf.nfs_srv, value, MAXSIZE);
         else if (keyis("net_crc", key))
                 gloconf.net_crc  = _value;
-        else if (keyis("dir_refresh", key))
-                gloconf.dir_refresh  = _value;
-        else if (keyis("file_refresh", key))
-                gloconf.file_refresh = _value;
         else if (keyis("polling_core", key))
-                strncpy(gloconf.polling_core, value, MAXSIZE);
+                gloconf.polling_core = _value;
         else if (keyis("polling_timeout", key))
                 gloconf.polling_timeout = _value * 1000;
         else if (keyis("aio_core", key))
-                strncpy(gloconf.aio_core, value, MAXSIZE);
+                gloconf.aio_core = _value;
         else if (keyis("max_lvm", key))
                 gloconf.max_lvm = _value > 65536 ? 65536 : _value;
 
@@ -695,12 +667,6 @@ int set_value(const char* key, const char* value, int type)
                 gloconf.sdevents_threads = (_value > SDEVENTS_THREADS_MAX ? SDEVENTS_THREADS_MAX : _value);
         else if (keyis("jobdock_size", key))
                 gloconf.jobdock_size = _value;
-        else if (keyis("yfs_jobtracker", key))
-                gloconf.yfs_jobtracker = _value;
-        else if (keyis("nfs_jobtracker", key))
-                gloconf.nfs_jobtracker = _value;
-        else if (keyis("objs_jobtracker", key))
-                gloconf.objs_jobtracker = _value;
         else if (keyis("chunk_entry_max", key))
                 gloconf.chunk_entry_max = _value;
         else if (keyis("disk_mt", key))
@@ -709,10 +675,6 @@ int set_value(const char* key, const char* value, int type)
                 gloconf.disk_mt_hdd = _value;
         else if (keyis("disk_mt_ssd", key))
                 gloconf.disk_mt_ssd = _value;
-        else if (keyis("preload_chk", key))
-                gloconf.preload_chk = _value;
-        else if (keyis("lookup_cache", key))
-                gloconf.lookup_cache = _value;
         else if (keyis("disk_worker", key))
                 gloconf.disk_worker = (_value > DISK_WORKER_MAX? DISK_WORKER_MAX: _value);
         else if (keyis("hb", key))

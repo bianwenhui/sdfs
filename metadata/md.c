@@ -3,7 +3,6 @@
 
 #define DBG_SUBSYS S_YFSMDC
 
-#include "align.h"
 #include "net_global.h"
 #include "job_dock.h"
 #include "ynet_rpc.h"
@@ -144,12 +143,6 @@ int md_init()
         }
 
         __mdid__ = array;
-
-#if 1
-        ret = init_redis();
-        if(ret)
-                GOTO(err_ret, ret);
-#endif
 
         return 0;
 err_ret:

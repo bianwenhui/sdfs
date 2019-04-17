@@ -22,7 +22,6 @@
 #include "yftp_conf.h"
 #include "ylog.h"
 #include "ynet_rpc.h"
-#include "ynet_rpc_old.h"
 #include "configure.h"
 #include "io_analysis.h"
 #include "network.h"
@@ -51,8 +50,16 @@ static void signal_handler(int sig)
         //inode_proto_dump();
         jobdock_iterator();
         netable_iterate();
-        analysis_dump();
+        analysis_dumpall();
 }
+
+void ftp_exit_handler(int sig)
+{
+        DWARN("got signal %d, exiting\n", sig);
+
+        ftp_srv_running = 0;
+}
+
 
 void *ftp_handler(void *arg)
 {
@@ -81,58 +88,23 @@ err_ret:
         return NULL;
 }
 
-int ftp_srv(void *args)
+static void *__ftp_run(void *args)
 {
         int ret, yftp_sd, epoll_fd = -1, cli_sd, nfds, i;
-        int daemon;
         struct epoll_event ev, *events;
         uint32_t len;
         void *ptr;
         pthread_t th;
         pthread_attr_t ta;
         yftp_args_t *yftp_args;
-        char path[MAX_PATH_LEN];
         char service[MAX_INFO_LEN];
 
         yftp_args = (yftp_args_t *)args;
-        if(yftp_args == NULL) {
-                DERROR("argument must not be empty !!!\n");
-                ret = EINVAL;
-                GOTO(err_ret, ret);
-        }
-
-        daemon = yftp_args->daemon;
         memset(service, 0, MAX_INFO_LEN);
         strcpy(service, yftp_args->service);
 
-        snprintf(path, MAX_NAME_LEN, "%s/status/status.pid", yftp_args->home);
-        ret = daemon_pid(path);
-        if (ret)
-                GOTO(err_ret, ret);
-
-        ret = ly_init(daemon, "ftp/0", -1);
-        if (ret)
-                GOTO(err_ret, ret);
-
-        ret = io_analysis_init("ftp", 0);
-        if (ret)
-                GOTO(err_ret, ret);
+        (void) sem_init(&clisd_sem, 0, 0);
         
-        ret = rpc_start(); /*begin serivce*/
-        if (ret)
-                GOTO(err_ret, ret);
-
-retry:
-        ret = network_connect_master();
-        if (ret) {
-                ret = _errno(ret);
-                if (ret == EAGAIN) {
-                        sleep(5);
-                        goto retry;
-                } else
-                        GOTO(err_ret, ret);
-        }
-
         epoll_fd = epoll_create(YFTP_EPOLL_SIZE);
         if (epoll_fd == -1) {
                 ret = errno;
@@ -161,31 +133,8 @@ retry:
 
         events = (struct epoll_event *)ptr;
 
-#if PROC_MONITOR_ON
-        ret = proc_init();
-        if (ret)
-                GOTO(err_ret, ret);
-
-        ret = proc_log("yftp");
-        if (ret)
-                GOTO(err_ret, ret);
-#endif
-
-        (void) pthread_attr_init(&ta);
-        (void) pthread_attr_setdetachstate(&ta, PTHREAD_CREATE_DETACHED);
-
-        (void) sem_init(&clisd_sem, 0, 0);
-
-        DBUG("yftp_srv started ...\n");
-
-        ret = ly_update_status("running", -1);
-        if (ret)
-                GOTO(err_ret, ret);
-
-        ftp_srv_running = 1;
-
-        while (srv_running) {
-                nfds = _epoll_wait(epoll_fd, events, YFTP_EPOLL_SIZE, -1);
+        while (ftp_srv_running) {
+                nfds = _epoll_wait(epoll_fd, events, YFTP_EPOLL_SIZE, 1 * 1000);
                 if (nfds == -1) {
                         ret = errno;
                         if (ret == EINTR) {
@@ -254,10 +203,6 @@ retry:
                 }
         }
 
-        ret = ly_update_status("stopping", -1);
-        if (ret)
-                GOTO(err_ret, ret);
-
         (void) sem_destroy(&clisd_sem);
 
         yfree((void **)&ptr);
@@ -265,6 +210,84 @@ retry:
         (void) sy_close(yftp_sd);
 
         (void) sy_close(epoll_fd);
+        
+        return NULL;
+err_ptr:
+        yfree((void **)&ptr);
+err_sd:
+        (void) sy_close(yftp_sd);
+err_fd:
+        (void) sy_close(epoll_fd);
+err_ret:
+        return NULL;
+}
+
+int ftp_srv(void *args)
+{
+        int ret;
+        int daemon;
+        yftp_args_t *yftp_args;
+        char path[MAX_PATH_LEN];
+        char service[MAX_INFO_LEN];
+
+        yftp_args = (yftp_args_t *)args;
+        if(yftp_args == NULL) {
+                DERROR("argument must not be empty !!!\n");
+                ret = EINVAL;
+                GOTO(err_ret, ret);
+        }
+
+        daemon = yftp_args->daemon;
+        memset(service, 0, MAX_INFO_LEN);
+        strcpy(service, yftp_args->service);
+
+        snprintf(path, MAX_NAME_LEN, "%s/status/status.pid", yftp_args->home);
+        ret = daemon_pid(path);
+        if (ret)
+                GOTO(err_ret, ret);
+
+        ret = ly_init(daemon, "ftp/0", -1);
+        if (ret)
+                GOTO(err_ret, ret);
+
+        ret = io_analysis_init("ftp", 0);
+        if (ret)
+                GOTO(err_ret, ret);
+        
+        ret = rpc_start(); /*begin serivce*/
+        if (ret)
+                GOTO(err_ret, ret);
+
+retry:
+        ret = network_connect_mond(1);
+        if (ret) {
+                ret = _errno(ret);
+                if (ret == EAGAIN) {
+                        sleep(5);
+                        goto retry;
+                } else
+                        GOTO(err_ret, ret);
+        }
+
+        ftp_srv_running = 1;
+        
+        DBUG("yftp_srv started ...\n");
+
+        ret = sy_thread_create2(__ftp_run, args, "__conn_worker");
+        if (ret)
+                GOTO(err_ret, ret);
+
+        ret = ly_update_status("running", -1);
+        if (ret)
+                GOTO(err_ret, ret);
+        
+        while (ftp_srv_running) {
+                sleep(1);
+        }
+        
+        ret = ly_update_status("stopping", -1);
+        if (ret)
+                GOTO(err_ret, ret);
 
         ret = ly_update_status("stopped", -1);
         if (ret)
@@ -273,12 +296,6 @@ retry:
         (void) ly_destroy();
 
         return 0;
-err_ptr:
-        yfree((void **)&ptr);
-err_sd:
-        (void) sy_close(yftp_sd);
-err_fd:
-        (void) sy_close(epoll_fd);
 err_ret:
         return ret;
 }
@@ -287,7 +304,7 @@ int main(int argc, char *argv[])
 {
         int ret, daemon = 1, maxcore __attribute__((unused)) = 0;
         char *service, c_opt;
-        char name[MAX_NAME_LEN], *home;
+        char name[MAX_NAME_LEN], *home = NULL;
         yftp_args_t yftp_args;
 
         service = YFTP_SERVICE_DEF;
@@ -338,7 +355,7 @@ int main(int argc, char *argv[])
 
         signal(SIGIO,  signal_handler);
         signal(SIGUSR1,  signal_handler);
-        signal(SIGUSR2, exit_handler);
+        signal(SIGUSR2, ftp_exit_handler);
 
         ret = ly_run(home, ftp_srv, &yftp_args);
         if (ret)

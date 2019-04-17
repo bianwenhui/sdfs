@@ -25,6 +25,7 @@
 #include "cd_proto.h"
 #include "job_dock.h"
 #include "job_tracker.h"
+#include "aio.h"
 #include "md_lib.h"
 #include "diskio.h"
 #include "../yfs/cds/disk.h"
@@ -34,7 +35,7 @@
 
 typedef struct {
         sem_t sem;
-        io_context_t  ctx;
+        aio_context_t  ctx;
         sy_spinlock_t lock;
         struct list_head list;
 } diskio_mt_t;
@@ -50,12 +51,12 @@ static diskio_mt_t  *diskio;
 static int __diskio_submit()
 {
         int ret, retval;
-        iocb_mt_t *iocb_mt;
+        iocb_mt_t *iocb_mt = NULL;
         struct iocb *iocb;
 
         ret = sy_spin_lock(&diskio->lock);
         if (unlikely(ret))
-                GOTO(err_ret, ret);
+                UNIMPLEMENTED(__DUMP__);
 
         YASSERT(!list_empty(&diskio->list));
         iocb_mt = (void *)diskio->list.next;
@@ -68,14 +69,14 @@ static int __diskio_submit()
         iocb = iocb_mt->iocb;
         
         if (iocb->aio_lio_opcode == IO_CMD_PWRITEV) {
-                ret = pwritev(iocb->aio_fildes, iocb->u.c.buf, iocb->u.c.nbytes, iocb->u.c.offset);
+                ret = pwritev(iocb->aio_fildes, (void *)iocb->aio_buf, iocb->aio_nbytes, iocb->aio_offset);
                 if (ret < 0) {
                         ret = errno;
                         GOTO(err_ret, ret);
                 }
         } else {
                 YASSERT(iocb->aio_lio_opcode == IO_CMD_PREADV);
-                ret = preadv(iocb->aio_fildes, iocb->u.c.buf, iocb->u.c.nbytes, iocb->u.c.offset);
+                ret = preadv(iocb->aio_fildes, (void *)iocb->aio_buf, iocb->aio_nbytes, iocb->aio_offset);
                 if (ret < 0) {
                         ret = errno;
                         GOTO(err_ret, ret);

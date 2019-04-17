@@ -85,6 +85,8 @@ class Config:
         self.uss_vip = _join(self.home, "app/admin/vip.py")
         self.uss_redisd = _join(self.home, "app/admin/redisd.py")
 
+        self.sdfs_mon = _join(self.home, "app/bin/sdfs.mon")
+        
         self.max_num = MAX_NUM
         self.cluster_conf = os.path.join(self.home, 'etc/cluster.conf')
         self.uss_conf = os.path.join(self.home, 'etc/sdfs.conf')
@@ -131,6 +133,7 @@ class Config:
         self.redis_sharding = int(d['mdsconf.redis_sharding'])
         self.redis_replica = int(d['mdsconf.redis_replica'])
         self.redis_baseport = int(d['mdsconf.redis_baseport'])
+        self.nfs_srv = d['globals.nfs_srv']
         self.wmem_max = int(d['globals.wmem_max'])
         self.rmem_max = int(d['globals.rmem_max'])
         self.master_vip = d['globals.master_vip']
@@ -138,8 +141,6 @@ class Config:
         self.testing = int(d['globals.testing'])
         self.valgrind = int(d['globals.valgrind'])
         self.solomode = int(d['globals.solomode'])
-        self.redis_total = int(d['mdsconf.redis_total'])
-        self.db = d['mdsconf.db']
         self.redis_dir = os.path.join(self.workdir, "redis")
 
     def __parse_line__(self, line, srv):
@@ -191,12 +192,6 @@ class Config:
             exit(1)
         
         #print cluster
-
-    def use_redis(self):
-        return self.db == "redis"
-
-    def use_leveldb(self):
-        False
 
     def dump_cluster(self, cluster=None, dumpto=None):
         #print (cluster, self.cluster)

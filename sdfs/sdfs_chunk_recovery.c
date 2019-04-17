@@ -6,7 +6,7 @@
 #define DBG_SUBSYS S_YFSLIB
 
 #include "sdfs_id.h"
-#include "aiocb.h"
+
 #include "md_lib.h"
 #include "chk_proto.h"
 #include "network.h"
@@ -22,7 +22,7 @@
 #include "sdfs_chunk.h"
 #include "network.h"
 #include "yfs_limit.h"
-#include "replica_rpc.h"
+#include "cds_rpc.h"
 #include "../cds/replica.h"
 #include "dbg.h"
 #include "worm_cli_lib.h"
@@ -69,7 +69,7 @@ static int __sdfs_chunk_pull(const nid_t *nid, const chkid_t *chkid, int *_fd, i
         offset = 0;
         while (offset < chksize) {
                 io_init(&io, chkid, Y_BLOCK_MAX, offset, 0);
-                ret = replica_rpc_read(nid, &io, &buf);
+                ret = cds_rpc_read(nid, &io, &buf);
                 if (ret) {
                         if (ret == ENOENT) {
                                 DWARN("pull chunk "OBJID_FORMAT" ENOENT\n", OBJID_ARG(chkid));
@@ -83,7 +83,7 @@ static int __sdfs_chunk_pull(const nid_t *nid, const chkid_t *chkid, int *_fd, i
                 offset += buf.len;
                 //YASSERT(offset > 0 && offset <= chksize);
 
-                ret = mbuffer_writefile(&buf, fd, 0, buf.len);
+                ret = mbuffer_writefile(&buf, fd, buf.len);
                 if (ret)
                         GOTO(err_fd, ret);
 
@@ -132,7 +132,7 @@ static int __sdfs_chunk_push(const nid_t *nid, const chkid_t *chkid, int fd, int
                         GOTO(err_free, ret);
 
                 io_init(&io, chkid, size, offset, 0);
-                ret = replica_rpc_write(nid, &io, &buf);
+                ret = cds_rpc_write(nid, &io, &buf);
                 if (ret)
                         GOTO(err_free1, ret);
 
@@ -155,7 +155,7 @@ err_ret:
 
 static int __sdfs_chunk_sync(const fileinfo_t *md, const chkinfo_t *chkinfo)
 {
-        int ret, fd, i, chksize;
+        int ret, fd = -1, i, chksize;
         int dist_count = 0, src_count = 0;
         nid_t dist[YFS_CHK_REP_MAX], src[YFS_CHK_REP_MAX];
         const nid_t *nid;
@@ -227,7 +227,7 @@ static int __sdfs_chunk_ec_pull_off(buffer_t *recover, unsigned char *src_in_err
                 YASSERT(recover[i].len == 0);
 
                 nid = &chkinfo->diskid[i];
-                ret = replica_rpc_read(nid, &io, &recover[i]);
+                ret = cds_rpc_read(nid, &io, &recover[i]);
                 if (ret) {
                         if (ret == ENOENT) {
                                 mbuffer_appendzero(&recover[i], size);
@@ -353,7 +353,7 @@ static int __sdfs_chunk_ec_push__(const nid_t *nid, const chkid_t *chkid, buffer
                         GOTO(err_ret, ret);
 
                 io_init(&io, chkid, size, offset, 0);
-                ret = replica_rpc_write(nid, &io, &buf);
+                ret = cds_rpc_write(nid, &io, &buf);
                 if (ret)
                         GOTO(err_ret, ret);
 
@@ -497,14 +497,14 @@ int sdfs_chunk_recovery(const chkid_t *chkid)
         
         chkinfo = (void *)_chkinfo;
         cid2fid(&fileid, chkid);
-        ret = md_getattr((void *)&md, &fileid);
+        ret = md_getattr(NULL, &fileid, (void *)&md);
         if (ret)
                 GOTO(err_ret, ret);
 
         repmin = (md.plugin != PLUGIN_NULL) ? md.k : 1;
 
-        begin = time(NULL);
-        ret = klock(chkid, 20, 0);
+        begin = gettime();
+        ret = klock(NULL, chkid, 20, 0);
         if (unlikely(ret))
                 GOTO(err_ret, ret);
         
@@ -531,7 +531,7 @@ int sdfs_chunk_recovery(const chkid_t *chkid)
                 DBUG("status %u\n", nid->status);
         }
 
-        now = time(NULL);
+        now = gettime();
         if (now - begin > 10) {
                 ret = ETIMEDOUT;
                 GOTO(err_lock, ret);
@@ -541,7 +541,7 @@ int sdfs_chunk_recovery(const chkid_t *chkid)
         if (ret)
                 GOTO(err_lock, ret);
         
-        ret = kunlock(chkid);
+        ret = kunlock(NULL, chkid);
         if (unlikely(ret))
                 GOTO(err_ret, ret);
 
@@ -549,7 +549,7 @@ int sdfs_chunk_recovery(const chkid_t *chkid)
         
         return 0;
 err_lock:
-        kunlock(chkid);
+        kunlock(NULL, chkid);
 err_ret:
         DWARN("recovery "CHKID_FORMAT" fail\n", CHKID_ARG(chkid));
         return ret;

@@ -13,6 +13,7 @@
 #include "ylib.h"
 #include "sdfs_lib.h"
 #include "yfs_md.h"
+#include "redis_util.h"
 #include "sdfs_buffer.h"
 
 #define RANGE_MAX 2
@@ -142,7 +143,7 @@ static int __ls_line(const char *path, const fileid_t *fileid, struct dirent *de
                 snprintf(depath, MAX_PATH_LEN, "%s/%s", path,
                          de->d_name);
 
-        ret = sdfs_getattr(fileid, &stbuf);
+        ret = sdfs_getattr(NULL, fileid, &stbuf);
         if (ret) {
                 if (ret == ENOENT) {
                         memset(&stbuf, 0x0, sizeof(stbuf));
@@ -224,43 +225,6 @@ err_ret:
         return ret;
 }
 
-#if 0
-
-static int __ls_count(const char *path, file_statis_t *file_statis, const filter_t *filter)
-{
-        int ret;
-        uint64_t from = 0, to = 0;
-
-        ret = ly_readdirplus_count(path, file_statis);
-        if (ret)
-                GOTO(err_ret, ret);
-
-        if (filter && (filter->travel_from != 0) && (filter->travel_to != 0)) {
-                if ((filter->travel_from > file_statis->total) && (filter->travel_to > file_statis->total)) {
-                        ret = EPERM;
-                        fprintf(stderr, "display range out total[%lu], please input again\n", file_statis->total);
-                        GOTO(err_ret, ret);
-                }
-
-                to = (filter->travel_to <= file_statis->total) ? filter->travel_to : file_statis->total;
-                from = (filter->travel_from <= file_statis->total) ? filter->travel_from : file_statis->total;
-                printf("total:%lu dir:%lu file:%lu display: %lu-%lu \n",
-                                file_statis->total, file_statis->dir_count, file_statis->file_count, from, to);
-        } else if (filter && (filter->travel_num != 0)) {
-                to = (filter->travel_num < file_statis->total) ? filter->travel_num : file_statis->total;
-                printf("total:%lu dir:%lu file:%lu display:%lu\n",
-                                file_statis->total, file_statis->dir_count, file_statis->file_count, to);
-        } else
-                printf("total:%lu dir:%lu file:%lu\n",
-                                file_statis->total, file_statis->dir_count, file_statis->file_count);
-
-        return 0;
-err_ret:
-        return ret;
-}
-
-#endif
-
 static int __number_check(const char *name, off_t *offset, size_t *size)
 {
         int ret, count = 0;
@@ -312,12 +276,7 @@ static int __ls_filter(const char *path, const filter_t *filter, int verbose, in
                 exit (ret);
         }
 
-#if ENABLE_NEWMD
-
         ret = sdfs_lookup_recurive(path, &fileid);
-#else
-        ret = sdfs_lookup_recurive(path, &fileid);
-#endif
         if (ret){
                 fprintf(stderr,"raw_lookup1 uss.ls: %s: No such file or directory\n",path);
                 exit (ret);
@@ -327,7 +286,7 @@ static int __ls_filter(const char *path, const filter_t *filter, int verbose, in
         
 #if 0
         struct stat stbuf;
-        ret = sdfs_getattr(&fileid, &stbuf);
+        ret = sdfs_getattr(NULL, &fileid, &stbuf);
         if (ret)
                 exit (ret);
 
@@ -357,20 +316,11 @@ static int __ls_filter(const char *path, const filter_t *filter, int verbose, in
         while (srv_running) {
                 DBUG("read %s offset %ju\n", path, offset);
 
-#if ENABLE_NEWMD
                 if (filter) {
-                        ret = sdfs_readdirplus_with_filter(&fileid, offset, &de0, &delen, filter);
+                        ret = sdfs_readdirplus_with_filter(NULL, &fileid, offset, &de0, &delen, filter);
                 } else {
-                        ret = sdfs_readdirplus(&fileid, offset, &de0, &delen);
+                        ret = sdfs_readdirplus(NULL, &fileid, offset, &de0, &delen);
                 }
-#else
-                if (filter) {
-                        ret = ly_readdirplus_with_filter(path, offset, &de0, &delen, filter);
-                } else {
-                        ret = ly_readdirplus(path, offset, &de0, &delen, EXEC_USS_CMD);
-                }
-#endif
-                
                 if (ret) {
                         fprintf(stderr, "ly_readdir(%s, ...) %s\n", path,
                                         strerror(ret));
@@ -439,7 +389,7 @@ inline static int __ls(const char *path, int verbose, int statis, int row)
                 GOTO(err_ret, ret);
         }
 
-        ret = sdfs_opendir(&dirid, &dirhandler);
+        ret = sdfs_opendir(NULL, &dirid, &dirhandler);
         if (ret)
                 GOTO(err_ret, ret);
 
@@ -448,7 +398,7 @@ inline static int __ls(const char *path, int verbose, int statis, int row)
         while (srv_running) {
                 DBUG("read %s offset %ju\n", path, offset);
 
-                ret = sdfs_readdir(dirhandler, &de, &fileid);
+                ret = sdfs_readdir(NULL, dirhandler, &de, &fileid);
                 if (ret) {
                         fprintf(stderr, "ly_readdir(%s, ...) %s\n", path,
                                 strerror(ret));
@@ -462,11 +412,11 @@ inline static int __ls(const char *path, int verbose, int statis, int row)
                 __ls_line(path, &fileid, de, verbose, row);
         }
 
-        sdfs_closedir(dirhandler);
+        sdfs_closedir(NULL, dirhandler);
 
         return 0;
 err_close:
-        sdfs_closedir(dirhandler);
+        sdfs_closedir(NULL, dirhandler);
 err_ret:
         return ret;
 }
@@ -489,8 +439,8 @@ int main(int argc, char *argv[])
         char c_opt, *prog, *path, *f_time = NULL, *t_time = NULL;
         uint32_t from_time = 0, to_time = 0;
         filter_t *filter = NULL, _filter;
-        off_t off;
-        size_t size;
+        off_t off = 0;
+        size_t size = 0;
 
         prog = strrchr(argv[0], '/');
         if (prog)

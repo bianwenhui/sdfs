@@ -92,14 +92,14 @@ int main(int argc, char *argv[])
 
         fileid.idx = 0;
         md = (void *)buf;
-        ret = md_getattr((void *)md, &fileid);
+        ret = md_getattr(NULL, &fileid, (void *)md);
         if (ret)
                 GOTO(err_ret, ret);
 
         MD2STAT(md, &stbuf);
 
         if (S_ISREG((stbuf).st_mode)) {
-                ret = sdfs_getattr(&fileid, &stbuf);
+                ret = sdfs_getattr(NULL, &fileid, &stbuf);
                 if (ret) {
                         DERROR("getattr ret: %d\n", ret);
                         size = 0;
